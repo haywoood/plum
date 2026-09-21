@@ -2,6 +2,7 @@
   "name": "@todomvc/model",
   "private": true,
   "version": "0.1.0",
+  "license": "(MIT OR Apache-2.0)",
   "type": "module",
   "description": "TodoMVC state and logic, written in Rust with Leptos and offered to the app as Nanostores.",
   "exports": "./index.ts",

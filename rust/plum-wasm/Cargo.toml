@@ -1,7 +1,12 @@
 [package]
 name = "plum-wasm"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "Runtime for plum: the bridge from Leptos signals and memos to JavaScript callbacks, used by the code plum-macro generates."
 
 [lib]
@@ -18,7 +23,9 @@ js-sys = "0.3"
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde-wasm-bindgen = { workspace = true }
-plum-macro = { path = "../plum-macro" }
+# Exact: the macros generate calls into this crate, so the two are released
+# together.
+plum-macro = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 any_spawner = { version = "0.3", features = ["wasm-bindgen"] }

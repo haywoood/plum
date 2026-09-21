@@ -10,7 +10,7 @@ React, Vue, Svelte, Solid or plain TypeScript to be able to build on it. The
 Rust team publishes an npm package. The front-end team installs it and reads
 stores. Rust, Leptos and WebAssembly do not appear in their code.
 
-Status: 0.1. Not on crates.io. The API will change. There is one example, in
+Status: 0.1. The API will change. There is one example, in
 `examples/todomvc`.
 
 ## What is in the repository
@@ -64,10 +64,10 @@ crate-type = ["rlib", "cdylib"]
 leptos = { version = "0.8", default-features = false }
 serde = { version = "1", features = ["derive"] }
 ts-rs = "12"
-plum-macro = { git = "https://github.com/haywoood/plum" }
+plum-macro = "0.1"
 
 # wasm build only
-plum-wasm = { git = "https://github.com/haywoood/plum", optional = true }
+plum-wasm = { version = "0.1", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 
 [features]
@@ -77,7 +77,8 @@ plum = ["dep:plum-wasm", "dep:wasm-bindgen"]
 Everything the macros generate for wasm is behind `#[cfg(feature = "plum")]`,
 so `cargo test` and your Leptos app build the crate with no wasm
 dependencies. `plum-macro` is not optional because the attributes have to
-resolve either way. The feature has to be named `plum`. It is a feature and
+resolve either way. The two crates are released together, so keep them on
+the same version. The feature has to be named `plum`. It is a feature and
 not a target check because your own Leptos app builds this crate for wasm32
 too, and should not get the exports.
 
@@ -366,7 +367,6 @@ or the bundler's equivalent), not bundled into each of them.
 ## Not there yet
 
 - Sending less than the whole value when a large `Vec` changes
-- Releases on crates.io
 
 ## Running the example
 
@@ -382,3 +382,12 @@ wasm package when Rust sources change. It needs
 
 `npm run check` is what CI runs: formatting, `cargo test`, the wasm and app
 builds, eslint, and clippy for native and wasm32.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in plum by you, as defined in the Apache-2.0 license,
+shall be dual licensed as above, without any additional terms or conditions.

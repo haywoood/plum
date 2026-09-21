@@ -108,10 +108,10 @@ crate-type = ["rlib", "cdylib"]
 leptos = { version = "0.8", default-features = false }
 serde = { version = "1", features = ["derive"] }
 ts-rs = "12"
-plum-macro = { git = "https://github.com/haywoood/plum" }
+plum-macro = "0.1"
 
 # wasm build only
-plum-wasm = { git = "https://github.com/haywoood/plum", optional = true }
+plum-wasm = { version = "0.1", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 
 [features]
@@ -122,8 +122,8 @@ The feature has to be named `plum`: everything generated for wasm is behind
 `#[cfg(feature = "plum")]`, so native builds and the team's own Leptos app
 get none of it. It is a feature and not a target check because that Leptos
 app builds the crate for wasm32 too. `plum-macro` is not optional, because
-the attributes have to resolve in every build. The API is still changing,
-so pin both git dependencies to a `rev` once the integration works.
+the attributes have to resolve in every build. The two crates are
+released together, so keep them on the same version.
 
 ### 3. Annotate the model
 

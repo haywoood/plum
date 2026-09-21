@@ -2,6 +2,7 @@
   "name": "plum",
   "private": true,
   "version": "0.1.0",
+  "license": "(MIT OR Apache-2.0)",
   "type": "module",
   "description": "Plum: an open-source Leptos-to-TypeScript adapter. Leptos owns the state/logic (Rust, view-agnostic); a thin wasm-bindgen bridge pushes values to JS; Nanostores is the public reactive type.",
   "workspaces": [
