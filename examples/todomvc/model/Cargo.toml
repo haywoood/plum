@@ -1,0 +1,48 @@
+[package]
+name = "todomvc-model"
+version = "0.1.0"
+edition = "2021"
+description = "TodoMVC domain logic on the view-agnostic Leptos core — stands in for an existing Leptos codebase in the plum example. With the `plum` feature it is also the wasm target (cdylib)."
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+leptos = { workspace = true }
+# `effects` feature: the autosave Effect needs it to spawn (the leptos facade
+# only enables it through csr/hydrate view features, which stay out).
+reactive_graph = { workspace = true }
+any_spawner = { workspace = true }
+serde = { workspace = true }
+
+# plum-macro is always present (tiny: syn/quote/proc-macro2) so the derive
+# and attribute can be applied unconditionally; the code they generate is
+# gated by #[cfg(feature = "plum")] inside the expansion.
+plum-macro = { workspace = true }
+ts-rs = { workspace = true }
+
+# Plum feature: opt-in wasm glue. When disabled, this crate is pure Leptos
+# with zero wasm/plum dependencies.
+wasm-bindgen = { workspace = true, optional = true }
+js-sys = { workspace = true, optional = true }
+plum-wasm = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+serde-wasm-bindgen = { workspace = true, optional = true }
+
+[features]
+default = []
+plum = [
+  "dep:wasm-bindgen",
+  "dep:js-sys",
+  "dep:plum-wasm",
+  "dep:serde_json",
+  "dep:serde-wasm-bindgen",
+]
+
+# The wasm build uses `plum_wasm::runtime::init()`; the
+# wasm-bindgen executor needs wasm-bindgen-futures at runtime.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = { workspace = true }
+
+[dev-dependencies]
+futures = { workspace = true }

@@ -1,0 +1,34 @@
+{
+  "name": "plum",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Plum: an open-source Leptos-to-TypeScript adapter. Leptos owns the state/logic (Rust, view-agnostic); a thin wasm-bindgen bridge pushes values to JS; Nanostores is the public reactive type.",
+  "workspaces": [
+    "examples/todomvc/model",
+    "examples/todomvc/app"
+  ],
+  "scripts": {
+    "dev": "node scripts/ensure-wasm.mjs && npm run dev -w todomvc-app",
+    "dev:rust": "watchexec -w examples/todomvc/model -w rust -e rs -e toml -- npm run build:wasm",
+    "build": "npm run build:wasm && npm run build:web",
+    "build:wasm": "wasm-pack build examples/todomvc/model --target web --features plum",
+    "build:web": "npm run build -w todomvc-app",
+    "preview": "npm run preview -w todomvc-app",
+    "test": "cargo test --workspace",
+    "lint": "eslint .",
+    "lint:rust": "cargo clippy --workspace --all-targets -- -D warnings && cargo clippy --workspace --all-targets --target wasm32-unknown-unknown -- -D warnings",
+    "typecheck": "node scripts/ensure-wasm.mjs && tsc -p examples/todomvc/app",
+    "format": "prettier --write . && cargo fmt --all",
+    "format:check": "prettier --check . && cargo fmt --all --check",
+    "check": "npm run format:check && npm test && npm run build && npm run lint && npm run lint:rust"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5",
+    "globals": "^17.12.0",
+    "prettier": "^3.9.8",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.70.0"
+  }
+}

@@ -1,0 +1,13 @@
+[package]
+name = "plum-macro"
+version = "0.1.0"
+edition = "2021"
+description = "proc-macro for plum: generates #[wasm_bindgen] bridge classes and TypeScript binding modules from a declarative spec."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"

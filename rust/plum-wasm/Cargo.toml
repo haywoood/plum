@@ -1,0 +1,30 @@
+[package]
+name = "plum-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "plum (Rust half): the generic effect-driven bridge from view-agnostic Leptos state to JavaScript callbacks, plus host-JS helpers. Consumed by per-app wasm adapter crates."
+
+[lib]
+# rlib: consumed by per-app wasm adapter crates (which are cdylibs).
+crate-type = ["rlib"]
+
+[dependencies]
+# The reactive_graph `effects` feature makes Leptos `Effect`s actually run
+# (the `leptos` facade only enables it via csr/hydrate view features, which
+# the bridge avoids). Version is unified with the one used by `leptos` 0.8.
+reactive_graph = { version = "0.2", features = ["effects"] }
+any_spawner = { version = "0.3", features = ["futures-executor"] }
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+serde = { workspace = true }
+serde_json = { workspace = true }
+plum-macro = { path = "../plum-macro" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+any_spawner = { version = "0.3", features = ["wasm-bindgen"] }
+
+[dev-dependencies]
+# Native test executor for the bridge's unit tests (never built into wasm).
+# `futures-executor` is pinned so `cargo test -p plum-wasm` works standalone
+# (workspace-wide builds get it via feature unification from leptos).
+any_spawner = { version = "0.3", features = ["futures-executor"] }

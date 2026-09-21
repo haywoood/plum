@@ -1,0 +1,11 @@
+{
+  "name": "@todomvc/model",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "TodoMVC state and logic, written in Rust with Leptos and offered to the app as Nanostores.",
+  "exports": "./index.ts",
+  "dependencies": {
+    "nanostores": "^1.5.3"
+  }
+}
