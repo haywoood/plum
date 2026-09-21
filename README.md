@@ -121,6 +121,13 @@ impl Todos {
     pub fn import(&self, todos: Vec<Todo>) -> Result<(), String> { /* ... */ }
     pub fn save(&self) { self.save.dispatch_local(self.list.get()); }
 
+    // a store that takes an argument
+    #[plum(watch)]
+    pub fn is_editing(&self, id: i32) -> Memo<bool> {
+        let editing_id = self.editing_id;
+        Memo::new(move |_| editing_id.get() == Some(id))
+    }
+
     #[plum(skip)]
     pub fn debug_dump(&self) -> String { /* stays in Rust */ }
 }
@@ -145,10 +152,16 @@ What is exposed:
 
 - Every watched field becomes a store, named after the field in camelCase or
   after the `js` override.
-- Every `pub fn` that takes `&self` becomes an action under its camelCase
-  name, or the one given with `#[plum(js = "...")]`. Left out are methods
-  marked `#[plum(skip)]`, methods that return a signal or memo, `&mut self`
-  methods and associated functions.
+- A method marked `#[plum(watch)]` becomes a store too. It returns the signal
+  or memo to watch. If it takes parameters, so does the store:
+  `stores.isEditing(id)`. The same arguments always give the same store
+  object, so it can be called during render. The method runs once per
+  subscription, and what it creates is disposed when the store loses its
+  listeners.
+- Every other `pub fn` that takes `&self` becomes an action under its
+  camelCase name, or the one given with `#[plum(js = "...")]`. Left out are
+  methods marked `#[plum(skip)]`, unmarked methods that return a signal or
+  memo, `&mut self` methods and associated functions.
 - `pub fn new(..)` becomes `createTodos(..)` with the same parameters. It can
   return `Self` or `Result<Self, E>`. Without a `new`, write the factory
   yourself around `WasmTodos::new_with(model)`.
@@ -249,6 +262,18 @@ export default function CountBar() {
 }
 ```
 
+A store that takes arguments is called where it is used:
+
+```tsx
+export default function TodoItem({ todo }: { todo: Todo }) {
+  const editing = useStore(todos.stores.isEditing(todo.id));
+  // ...
+}
+```
+
+Each row listens to its own answer, so starting an edit re-renders that row
+and not the list.
+
 `todos.stores.*` are plain `ReadableAtom`s. `todos.actions` has the model's
 methods and nothing else, with the types they have in Rust:
 `setFilter(filter: Filter): void`. The actions are plain functions, so one
@@ -258,10 +283,13 @@ the top level of a module.
 
 ## How it behaves
 
-- Each watched field gets one Leptos `Effect`, created when `bindTodos` runs,
-  whether or not anything subscribes to the store.
-- The first value is delivered synchronously, so a store is never
-  `undefined`.
+- A store is subscribed in Rust, with one Leptos `Effect`, while it has
+  listeners. Nanostores drops the subscription a second after the last one
+  leaves. A store nobody uses costs nothing.
+- The first value is delivered synchronously when a store is listened to or
+  read, so it is never `undefined`.
+- Arguments of a store are compared as data: two calls give the same store
+  when `JSON.stringify` of their arguments is equal.
 - When an action returns, every store it affected already holds the new
   value. Leptos runs effects on a later tick, so the generated action wrapper
   flushes the bridge before it returns. A store can therefore back a
@@ -285,7 +313,6 @@ the top level of a module.
 
 ## Not there yet
 
-- Subscribing lazily, only when a store has listeners
 - Sending less than the whole value when a large `Vec` changes
 - Releases on crates.io
 

@@ -3,8 +3,10 @@
 //! The block is passed through unchanged. Next to it the macro generates
 //!
 //! - an action on the wasm class for every `pub fn` that takes `&self`,
+//! - a store for every such method marked `#[plum(watch)]`: it returns a
+//!   reactive value, and if it takes arguments the store does too,
 //! - a `create{Model}` factory from `pub fn new(..)`, with its parameters,
-//! - the TypeScript signatures of those actions, for the generated binding.
+//! - the TypeScript for all of those, for the generated binding.
 //!
 //! Every argument arrives as a `JsValue` and is deserialized into the type
 //! the method declares, so the macro never has to recognise a type by name.
@@ -19,8 +21,9 @@ use syn::{FnArg, Ident, ImplItem, ImplItemFn, ItemImpl, Pat, ReturnType, Type};
 
 use crate::naming::{snake_case, snake_to_camel, wasm_class_name};
 
-/// Reactive handles. A method that returns one is an accessor for Rust
-/// callers, not an action. `#[plum(skip)]` covers anything not listed.
+/// Reactive handles. A method that returns one and is not marked
+/// `#[plum(watch)]` is an accessor for Rust callers, not an action.
+/// `#[plum(skip)]` covers anything not listed.
 const HANDLES: &[&str] = &[
     "RwSignal",
     "ReadSignal",
@@ -53,6 +56,7 @@ struct Param {
 #[derive(Default)]
 struct Options {
     skip: bool,
+    watch: bool,
     js: Option<String>,
 }
 
@@ -92,10 +96,16 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
         }
         match func.sig.inputs.first() {
             Some(FnArg::Receiver(r)) if r.reference.is_some() && r.mutability.is_none() => {
+                let js = options.js.unwrap_or_else(|| snake_to_camel(&name));
+                if options.watch {
+                    let params = params(func)?;
+                    actions.push(store(func, &js, &params)?);
+                    signatures.push(store_signature(func, &js, &params));
+                    continue;
+                }
                 if name == "dispose" || returns_handle(&func.sig.output) {
                     continue;
                 }
-                let js = options.js.unwrap_or_else(|| snake_to_camel(&name));
                 let params = params(func)?;
                 actions.push(action(func, &js, &params));
                 signatures.push(signature(func, &js, &params));
@@ -125,10 +135,15 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
             pub fn __plum_actions<V: ::ts_rs::TypeVisitor>(
                 cfg: &::ts_rs::Config,
                 visitor: &mut V,
-            ) -> (String, String) {
+            ) -> [String; 5] {
+                // Members of the actions interface and of the object that
+                // implements it, then the same two for stores, then what the
+                // stores need from the wasm class.
                 let (mut sigs, mut fns) = (String::new(), String::new());
+                let (mut store_sigs, mut store_fns) = (String::new(), String::new());
+                let mut wasm_sigs = String::new();
                 #(#signatures)*
-                (sigs, fns)
+                [sigs, fns, store_sigs, store_fns, wasm_sigs]
             }
         }
     })
@@ -146,11 +161,14 @@ fn take_options(func: &mut ImplItemFn) -> syn::Result<Options> {
             if meta.path.is_ident("skip") {
                 options.skip = true;
                 Ok(())
+            } else if meta.path.is_ident("watch") {
+                options.watch = true;
+                Ok(())
             } else if meta.path.is_ident("js") {
                 options.js = Some(meta.value()?.parse::<syn::LitStr>()?.value());
                 Ok(())
             } else {
-                Err(meta.error("plum: expected `skip` or `js = \"...\"`"))
+                Err(meta.error("plum: expected `skip`, `watch` or `js = \"...\"`"))
             }
         });
         if let Err(e) = parsed {
@@ -294,6 +312,102 @@ fn action(func: &ImplItemFn, js: &str, params: &[Param]) -> TokenStream {
             let (core, bridge) = self.__plum();
             #conversions
             #body
+        }
+    }
+}
+
+/// A `#[plum(watch)]` method: `watch{Name}(args.., callback)` on the wasm
+/// class. The method is called once per subscription, inside a scope that is
+/// cleaned up on unwatch, so a memo it creates lives as long as the store has
+/// listeners.
+fn store(func: &ImplItemFn, js: &str, params: &[Param]) -> syn::Result<TokenStream> {
+    let ReturnType::Type(_, returned) = &func.sig.output else {
+        return Err(syn::Error::new_spanned(
+            &func.sig,
+            "plum: a #[plum(watch)] method returns the signal or memo to watch",
+        ));
+    };
+    let name = &func.sig.ident;
+    let rust = format_ident!("__plum_watch_{}", name);
+    let watch = watch_name(js);
+    let names = params.iter().map(|p| &p.name);
+    let conversions = conversions(js, params);
+    let args = call_args(params);
+    let body = quote_spanned! {returned.span()=>
+        let scope = ::plum_wasm::__rt::Owner::new();
+        let source = scope.with(|| core.#name(#(#args),*));
+        ::core::result::Result::Ok(bridge.watch_json_scoped(
+            scope,
+            move || ::leptos::reactive::traits::Get::get(&source),
+            f,
+        ))
+    };
+    Ok(quote! {
+        #[::wasm_bindgen::prelude::wasm_bindgen(js_name = #watch)]
+        pub fn #rust(
+            &self,
+            #(#names: ::wasm_bindgen::JsValue,)*
+            f: ::plum_wasm::__rt::js_sys::Function,
+        ) -> ::core::result::Result<u32, ::wasm_bindgen::JsValue> {
+            let (core, bridge) = self.__plum();
+            #conversions
+            #body
+        }
+    })
+}
+
+/// "isEditing" -> "watchIsEditing".
+fn watch_name(js: &str) -> String {
+    let mut chars = js.chars();
+    match chars.next() {
+        Some(c) => format!("watch{}{}", c.to_ascii_uppercase(), chars.as_str()),
+        None => String::from("watch"),
+    }
+}
+
+/// The TypeScript for one `#[plum(watch)]` method. Without parameters it is
+/// a store; with parameters it is a function from arguments to a store.
+fn store_signature(func: &ImplItemFn, js: &str, params: &[Param]) -> TokenStream {
+    let ReturnType::Type(_, returned) = &func.sig.output else {
+        return TokenStream::new();
+    };
+    let value = quote_spanned! {returned.span()=>
+        <#returned as ::leptos::reactive::traits::Get>::Value
+    };
+    let watch = watch_name(js);
+    let labels: Vec<String> = params
+        .iter()
+        .map(|p| snake_to_camel(&p.name.to_string()))
+        .collect();
+    let types = params.iter().map(|p| ts_name(&p.ts));
+    let list = labels.join(", ");
+    let plain = params.is_empty();
+    quote! {
+        {
+            let value = {
+                visitor.visit::<#value>();
+                <#value as ::ts_rs::TS>::name(cfg)
+            };
+            let params: Vec<String> = vec![#(format!("{}: {}", #labels, #types)),*];
+            let params = params.join(", ");
+            if #plain {
+                store_sigs.push_str(&format!("  {}: ReadableAtom<{value}>;\n", #js));
+                store_fns.push_str(&format!(
+                    "      {}: readable((cb) => model.{}(cb), unwatch),\n",
+                    #js, #watch
+                ));
+                wasm_sigs.push_str(&format!("  {}(cb: (v: {value}) => void): number;\n", #watch));
+            } else {
+                store_sigs.push_str(&format!("  {}({params}): ReadableAtom<{value}>;\n", #js));
+                store_fns.push_str(&format!(
+                    "      {0}: family<[{params}], {value}>(({1}, cb) => model.{2}({1}, cb), unwatch),\n",
+                    #js, #list, #watch
+                ));
+                wasm_sigs.push_str(&format!(
+                    "  {}({params}, cb: (v: {value}) => void): number;\n",
+                    #watch
+                ));
+            }
         }
     }
 }

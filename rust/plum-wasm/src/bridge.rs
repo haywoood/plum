@@ -22,7 +22,7 @@ use std::rc::Rc;
 use js_sys::Function;
 use reactive_graph::effect::Effect;
 use reactive_graph::graph::{untrack, ReactiveNode, Subscriber, ToAnySubscriber, WithObserver};
-use reactive_graph::owner::LocalStorage;
+use reactive_graph::owner::{LocalStorage, Owner};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsValue;
@@ -136,6 +136,12 @@ fn to_js(payload: &Payload) -> JsValue {
     }
 }
 
+fn to_payload<T: serde::Serialize>(value: &T) -> Payload {
+    serde_json::to_value(value)
+        .unwrap_or(serde_json::Value::Null)
+        .into()
+}
+
 /// Calls the JS callback with a payload (wasm only; a no-op natively).
 #[cfg(target_arch = "wasm32")]
 fn push(cb: &Function, payload: &Payload) {
@@ -149,6 +155,18 @@ struct Subscription {
     effect: Effect<LocalStorage>,
     /// Reads the source and hands the payload to the sink if it changed.
     deliver: Rc<dyn Fn()>,
+    /// Owns what was created for this subscription alone, such as the memo
+    /// behind a store that takes arguments. Cleaned up on unwatch.
+    scope: Option<Owner>,
+}
+
+impl Subscription {
+    fn stop(self) {
+        self.effect.stop();
+        if let Some(scope) = self.scope {
+            scope.cleanup();
+        }
+    }
 }
 
 /// The bridge: a registry of active subscriptions, one Leptos `Effect` each.
@@ -183,6 +201,24 @@ impl Bridge {
         F: Fn() -> Payload + 'static,
         S: Fn(&Payload) + 'static,
     {
+        self.subscribe(None, read, sink)
+    }
+
+    /// [`Bridge::watch_with`] for a source that was created inside `scope`
+    /// for this subscription. The scope is cleaned up when it is unwatched.
+    pub fn watch_scoped_with<F, S>(&self, scope: Owner, read: F, sink: S) -> u32
+    where
+        F: Fn() -> Payload + 'static,
+        S: Fn(&Payload) + 'static,
+    {
+        self.subscribe(Some(scope), read, sink)
+    }
+
+    fn subscribe<F, S>(&self, scope: Option<Owner>, read: F, sink: S) -> u32
+    where
+        F: Fn() -> Payload + 'static,
+        S: Fn(&Payload) + 'static,
+    {
         let last = RefCell::new(None::<Payload>);
         let deliver: Rc<dyn Fn()> = Rc::new(move || {
             let value = read();
@@ -199,9 +235,14 @@ impl Bridge {
         });
         let id = self.next.get();
         self.next.set(id + 1);
-        self.subs
-            .borrow_mut()
-            .insert(id, Subscription { effect, deliver });
+        self.subs.borrow_mut().insert(
+            id,
+            Subscription {
+                effect,
+                deliver,
+                scope,
+            },
+        );
         id
     }
 
@@ -239,20 +280,28 @@ impl Bridge {
         T: serde::Serialize + 'static,
         F: Fn() -> T + 'static,
     {
-        self.watch(
-            move || {
-                serde_json::to_value(read())
-                    .unwrap_or(serde_json::Value::Null)
-                    .into()
-            },
-            cb,
+        self.watch(move || to_payload(&read()), cb)
+    }
+
+    /// [`Bridge::watch_json`] for a source created inside `scope`; see
+    /// [`Bridge::watch_scoped_with`].
+    pub fn watch_json_scoped<T, F>(&self, scope: Owner, read: F, cb: Function) -> u32
+    where
+        T: serde::Serialize + 'static,
+        F: Fn() -> T + 'static,
+    {
+        self.watch_scoped_with(
+            scope,
+            move || to_payload(&read()),
+            move |payload| push(&cb, payload),
         )
     }
 
     /// Stops the subscription with the given id (no further pushes).
     pub fn unwatch(&self, id: u32) {
-        if let Some(sub) = self.subs.borrow_mut().remove(&id) {
-            sub.effect.stop();
+        let sub = self.subs.borrow_mut().remove(&id);
+        if let Some(sub) = sub {
+            sub.stop();
         }
     }
 
@@ -260,7 +309,7 @@ impl Bridge {
     pub fn unwatch_all(&self) {
         let subs: Vec<_> = self.subs.borrow_mut().drain().collect();
         for (_, sub) in subs {
-            sub.effect.stop();
+            sub.stop();
         }
     }
 }
@@ -344,6 +393,27 @@ mod tests {
         assert_eq!(counts.borrow().len(), 1);
         tick();
         assert_eq!(*counts.borrow(), [Payload::I32(1), Payload::I32(7)]);
+    }
+
+    #[test]
+    fn unwatch_disposes_what_the_subscription_created() {
+        use reactive_graph::traits::GetUntracked;
+        let (bridge, count, ..) = setup();
+        let scope = Owner::new();
+        let is_five = scope.with(|| Memo::new(move |_| count.get() == 5));
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let id = bridge.watch_scoped_with(scope, move || is_five.get().into(), {
+            let seen = Rc::clone(&seen);
+            move |p| seen.borrow_mut().push(p.clone())
+        });
+        count.set(5);
+        bridge.flush();
+        assert_eq!(*seen.borrow(), [Payload::Bool(false), Payload::Bool(true)]);
+        bridge.unwatch(id);
+        assert!(
+            is_five.try_get_untracked().is_none(),
+            "the memo is disposed"
+        );
     }
 
     #[test]
