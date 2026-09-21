@@ -10,7 +10,7 @@ export default function EditTodoInput() {
       aria-label="Edit todo"
       value={text}
       autoFocus
-      onChange={(e) => todos.actions.setEditText(e.target.value)}
+      onChange={(e) => todos.stores.editText.set(e.target.value)}
       onKeyDown={(e) => todos.actions.editKey(e.key)}
       onBlur={todos.actions.commitEdit}
     />

@@ -16,7 +16,7 @@ export default function NewTodoForm() {
         aria-label="New todo"
         value={text}
         placeholder="What needs to be done?"
-        onChange={(e) => todos.actions.setInputText(e.target.value)}
+        onChange={(e) => todos.stores.inputText.set(e.target.value)}
       />
       <button type="submit">Add</button>
     </form>

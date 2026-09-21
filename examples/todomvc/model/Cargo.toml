@@ -18,7 +18,9 @@ serde = { workspace = true }
 # Always present, so the derive and the attribute resolve in every build.
 # What they generate for wasm is behind #[cfg(feature = "plum")].
 plum-macro = { workspace = true }
-ts-rs = { workspace = true }
+ts-rs = { workspace = true, features = ["serde-json-impl"] }
+# Platform data holds arbitrary JSON.
+serde_json = { workspace = true }
 
 # The wasm build. plum needs plum-wasm and wasm-bindgen; js-sys and
 # serde-wasm-bindgen are for this crate's own localStorage code.
