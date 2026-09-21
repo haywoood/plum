@@ -22,6 +22,16 @@ Status: 0.1. Not on crates.io. The API will change. There is one example, in
 - `examples/todomvc/model`: a Leptos crate that uses both, and the 15-line
   `index.ts` that turns its wasm build into an npm package.
 - `examples/todomvc/app`: a React app that uses that package.
+- `skills/plum`: a skill that teaches a coding agent to do the integration.
+
+## With an agent
+
+`skills/plum` is a skill for coding agents: the integration steps below, what
+belongs in the model and what in the view, and what each compile error
+means. Copy the directory to where your agent looks for skills (for Claude
+Code, `.claude/skills/` in your repository) and ask it to expose a crate
+with plum. Moving state out of components into a model is most of the work,
+and it is work an agent does well.
 
 ## Requirements
 
