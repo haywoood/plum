@@ -35,10 +35,13 @@ pub fn global() -> JsValue {
     js_sys::global().into()
 }
 
-/// Maps a caught JS error to a plain Rust error string.
+/// Maps a caught JS error to a plain Rust error string: the message of an
+/// `Error`, a thrown string as it is, anything else in debug form.
 pub fn js_err(e: &JsValue) -> String {
-    e.as_string()
-        .unwrap_or_else(|| "unknown JS error".to_string())
+    match e.dyn_ref::<js_sys::Error>() {
+        Some(error) => error.message().into(),
+        None => e.as_string().unwrap_or_else(|| format!("{e:?}")),
+    }
 }
 
 /// Convenience: look up a property on an object and treat it as a function.
