@@ -9,7 +9,7 @@
 //! - **native**: the `futures` executor — a thread-local pool that tests and
 //!   examples drive with [`pump`].
 
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::sync::Once;
 
 use leptos::prelude::*;
@@ -17,12 +17,13 @@ use leptos::prelude::*;
 static EXECUTOR_INIT: Once = Once::new();
 
 thread_local! {
-    static OWNER_SET: Cell<bool> = const { Cell::new(false) };
+    // `Owner::set` keeps only a weak reference; the root is held here.
+    static ROOT: RefCell<Option<Owner>> = const { RefCell::new(None) };
 }
 
-/// Configures the global executor (once) and sets the root owner for the
-/// current thread. Cheap to call repeatedly; call it before creating signals
-/// or spawning async work.
+/// Configures the global executor (once) and, unless the thread already has
+/// one, a root owner. Under plum the generated factory has done this by the
+/// time a model is constructed; tests and native hosts get it from here.
 pub fn ensure_init() {
     EXECUTOR_INIT.call_once(|| {
         #[cfg(target_arch = "wasm32")]
@@ -30,13 +31,11 @@ pub fn ensure_init() {
         #[cfg(not(target_arch = "wasm32"))]
         let _ = any_spawner::Executor::init_futures_executor();
     });
-    OWNER_SET.with(|set| {
-        if !set.get() {
-            let owner = Owner::new();
-            owner.set();
-            set.set(true);
-        }
-    });
+    if Owner::current().is_none() {
+        let root = Owner::new();
+        root.set();
+        ROOT.with(|slot| *slot.borrow_mut() = Some(root));
+    }
 }
 
 /// Drives the native executor until spawned tasks are idle (cargo test /

@@ -7,7 +7,8 @@
 //! Leptos schedules effects on a later tick. JS should not have to wait for
 //! that after calling into Rust, so the generated action wrappers call
 //! [`Bridge::flush`] before they return: every subscription whose sources
-//! changed is delivered right away. Changes that do not come from a JS call
+//! changed is delivered right away, on every bridge of the thread, because
+//! an action of one model can change what another model's stores show. Changes that do not come from a JS call
 //! (an async load finishing, an autosave) arrive through the effect as usual.
 //! Each subscription remembers the last payload it delivered and skips
 //! repeats, so the two paths never deliver the same value twice.
@@ -17,7 +18,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use js_sys::Function;
 use reactive_graph::effect::Effect;
@@ -161,26 +162,44 @@ struct Subscription {
 }
 
 impl Subscription {
-    fn stop(self) {
+    /// Stops the effect and empties the scope, which can then be used again.
+    fn stop(self) -> Option<Owner> {
         self.effect.stop();
-        if let Some(scope) = self.scope {
-            scope.cleanup();
-        }
+        self.scope.inspect(Owner::cleanup)
     }
 }
 
 /// The bridge: a registry of active subscriptions, one Leptos `Effect` each.
+type Subscriptions = RefCell<HashMap<u32, Subscription>>;
+
+thread_local! {
+    /// The subscriptions of every live bridge, for [`Bridge::flush`].
+    static BRIDGES: RefCell<Vec<Weak<Subscriptions>>> = const { RefCell::new(Vec::new()) };
+}
+
 pub struct Bridge {
-    subs: RefCell<HashMap<u32, Subscription>>,
+    subs: Rc<Subscriptions>,
     next: Cell<u32>,
+    /// Emptied scopes. A new owner registers with its parent for good, so
+    /// they are reused: as many exist as were ever needed at once.
+    idle_scopes: RefCell<Vec<Owner>>,
 }
 
 impl Bridge {
     pub fn new() -> Self {
+        let subs = Rc::new(RefCell::new(HashMap::new()));
+        BRIDGES.with(|bridges| bridges.borrow_mut().push(Rc::downgrade(&subs)));
         Self {
-            subs: RefCell::new(HashMap::new()),
+            subs,
             next: Cell::new(1),
+            idle_scopes: RefCell::new(Vec::new()),
         }
+    }
+
+    /// An owner for what one subscription creates, such as the memo behind a
+    /// store that takes arguments. Pass it to [`Bridge::watch_json_scoped`].
+    pub fn scope(&self) -> Owner {
+        self.idle_scopes.borrow_mut().pop().unwrap_or_default()
     }
 
     /// Subscribes the JS function `cb` to a reactive source.
@@ -246,18 +265,27 @@ impl Bridge {
         id
     }
 
-    /// Delivers every pending change now instead of on the next tick.
+    /// Delivers every pending change now instead of on the next tick, for
+    /// all bridges of this thread.
     ///
     /// This asks each effect the question its own run loop asks
     /// (`update_if_necessary`) and re-runs it on the spot. The scheduled run
     /// then finds nothing left to do.
     pub fn flush(&self) {
+        let bridges: Vec<Rc<Subscriptions>> = BRIDGES.with(|bridges| {
+            let mut bridges = bridges.borrow_mut();
+            bridges.retain(|subs| subs.strong_count() > 0);
+            bridges.iter().filter_map(Weak::upgrade).collect()
+        });
         // Collected first: a sink may call `watch`/`unwatch` while we iterate.
-        let pending: Vec<_> = self
-            .subs
-            .borrow()
-            .values()
-            .map(|sub| (sub.effect.to_any_subscriber(), Rc::clone(&sub.deliver)))
+        let pending: Vec<_> = bridges
+            .iter()
+            .flat_map(|subs| {
+                subs.borrow()
+                    .values()
+                    .map(|sub| (sub.effect.to_any_subscriber(), Rc::clone(&sub.deliver)))
+                    .collect::<Vec<_>>()
+            })
             .collect();
         for (subscriber, deliver) in pending {
             if subscriber.with_observer(|| subscriber.update_if_necessary()) {
@@ -300,8 +328,8 @@ impl Bridge {
     /// Stops the subscription with the given id (no further pushes).
     pub fn unwatch(&self, id: u32) {
         let sub = self.subs.borrow_mut().remove(&id);
-        if let Some(sub) = sub {
-            sub.stop();
+        if let Some(scope) = sub.and_then(Subscription::stop) {
+            self.idle_scopes.borrow_mut().push(scope);
         }
     }
 
@@ -311,6 +339,7 @@ impl Bridge {
         for (_, sub) in subs {
             sub.stop();
         }
+        self.idle_scopes.borrow_mut().clear();
     }
 }
 
@@ -374,6 +403,20 @@ mod tests {
     }
 
     #[test]
+    fn flush_reaches_the_other_bridges_of_the_thread() {
+        let (bridge, count, ..) = setup();
+        let other = Bridge::new();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        other.watch_with(move || count.get().into(), {
+            let seen = Rc::clone(&seen);
+            move |p| seen.borrow_mut().push(p.clone())
+        });
+        count.set(3);
+        bridge.flush();
+        assert_eq!(*seen.borrow(), [Payload::I32(1), Payload::I32(3)]);
+    }
+
+    #[test]
     fn nothing_is_delivered_twice() {
         let (bridge, count, counts, doubles, _) = setup();
         tick(); // the effects' own first run
@@ -399,7 +442,7 @@ mod tests {
     fn unwatch_disposes_what_the_subscription_created() {
         use reactive_graph::traits::GetUntracked;
         let (bridge, count, ..) = setup();
-        let scope = Owner::new();
+        let scope = bridge.scope();
         let is_five = scope.with(|| Memo::new(move |_| count.get() == 5));
         let seen = Rc::new(RefCell::new(Vec::new()));
         let id = bridge.watch_scoped_with(scope, move || is_five.get().into(), {
@@ -414,6 +457,9 @@ mod tests {
             is_five.try_get_untracked().is_none(),
             "the memo is disposed"
         );
+        assert_eq!(bridge.idle_scopes.borrow().len(), 1, "its scope is kept");
+        let _reused = bridge.scope();
+        assert!(bridge.idle_scopes.borrow().is_empty());
     }
 
     #[test]

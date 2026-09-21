@@ -8,7 +8,6 @@ use serde::Serialize;
 use wasm_bindgen::JsValue;
 
 pub use js_sys;
-pub use reactive_graph::owner::Owner;
 
 /// Converts an argument that arrived from JS. A value of the wrong shape
 /// becomes a JS exception that names the action and the parameter.

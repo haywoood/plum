@@ -102,6 +102,8 @@ pub struct Todos {
     list: RwSignal<Vec<Todo>>,
     #[plum(watch)]
     filter: RwSignal<Filter>,
+    #[plum(watch, set)]
+    draft: RwSignal<String>, // JS can write it: stores.draft.set("...")
     #[plum(watch)]
     remaining: Memo<i32>,
     #[plum(watch)]
@@ -152,6 +154,12 @@ What is exposed:
 
 - Every watched field becomes a store, named after the field in camelCase or
   after the `js` override.
+- A store is writable when it says how: `#[plum(watch, set)]` on a field sets
+  the field itself, and `#[plum(watch, set = "method")]`, on a field or a
+  method, calls that method of the model, which can validate or normalise.
+  JS gets a `WritableAtom`, and `store.set(value)` has gone through Rust and
+  come back by the time it returns. A method named as a setter is not listed
+  as an action.
 - A method marked `#[plum(watch)]` becomes a store too. It returns the signal
   or memo to watch. If it takes parameters, so does the store:
   `stores.isEditing(id)`. The same arguments always give the same store
@@ -291,17 +299,20 @@ the top level of a module.
 - Arguments of a store are compared as data: two calls give the same store
   when `JSON.stringify` of their arguments is equal.
 - When an action returns, every store it affected already holds the new
-  value. Leptos runs effects on a later tick, so the generated action wrapper
-  flushes the bridge before it returns. A store can therefore back a
+  value, including stores of other models on the same page. Leptos runs
+  effects on a later tick, so the generated action wrapper flushes every
+  bridge before it returns. A store can therefore back a
   controlled text input, as `inputText` does in the example.
 - Changes that do not come from a JS call, such as an async load finishing,
   arrive when Leptos runs the effect. A value is never delivered twice.
 - Values are serialized whole. A `Vec` signal sends the entire array on every
   change. `None` arrives as `null`.
-- Stores are read-only. Writes go through actions.
+- A store is read-only unless it is marked `set`. Every write, through an
+  action or through `store.set`, happens in Rust.
 - 64-bit integers are JS numbers, in stores and in actions.
 - The generated `createTodos()` sets up the `any_spawner` executor and a root
-  `Owner` before it calls `new()`. When you construct the model somewhere
+  `Owner` before it calls `new()`. The root is kept alive, so
+  `provide_context` and `use_context` work between models. When you construct the model somewhere
   else, such as native tests or a Leptos app, that is up to you.
   `examples/todomvc/model/src/runtime.rs` has the headless version.
 - The macros do not write files. `plum_gen/todos.ts` is written by the
@@ -310,6 +321,35 @@ the top level of a module.
   through a `Storage` struct of two async closures, with a wasm
   implementation and a fake for tests. `plum_wasm::js` has a few helpers for
   calling JS functions without web-sys.
+
+## State shared across the platform
+
+Not part of plum, but something it makes possible, and the example does it.
+`examples/todomvc/model/src/platform_data.rs` is a model that holds named,
+reactive JSON values:
+
+```ts
+platformdata.createStore("cart/state", { items: 0 });
+const cart = useStore(platformdata.getStore<Cart>("cart/state"));
+platformdata.getStore<Cart>("cart/state").set({ items: 1 });
+```
+
+- `getStore(name)` is a store that takes an argument, so the same name gives
+  the same store to everyone, and it can be subscribed to before the store
+  has been created.
+- A model written in Rust defines its stores with a type, and the platform
+  refuses a write of any other shape, from anyone. The todos model keeps all
+  of its state there, under its own name, and is itself only CRUD logic and
+  lenses over it. Code with no Rust model, such as a microfrontend, creates
+  untyped stores from JS.
+- Models find the platform data through Leptos context.
+
+Two things to know before building on this. Every write crosses into wasm
+and back as JSON, which suits state that Rust should see, validate or
+persist, and does not suit large values that change on every keystroke. And
+"the same name gives the same store" only holds if every microfrontend uses
+one instance of the package, so it has to be a shared module (an import map
+or the bundler's equivalent), not bundled into each of them.
 
 ## Not there yet
 

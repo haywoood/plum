@@ -58,6 +58,8 @@ struct Options {
     skip: bool,
     watch: bool,
     js: Option<String>,
+    /// `set = "method"` on a watched method: the method that writes it.
+    set: Option<syn::LitStr>,
 }
 
 pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
@@ -75,12 +77,36 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
     .ok_or_else(|| syn::Error::new_spanned(&item.self_ty, "plum: cannot name this type"))?;
     let wasm = Ident::new(&wasm_class_name(&model.to_string()), Span::call_site());
 
-    let mut actions = Vec::new();
-    let mut signatures = Vec::new();
-    let mut factory = TokenStream::new();
+    // First the options and JS names of everything, so that a store can
+    // look up the method that writes it.
+    let mut members = Vec::new();
     for member in &mut item.items {
         let ImplItem::Fn(func) = member else { continue };
         let options = take_options(func)?;
+        let js = options
+            .js
+            .clone()
+            .unwrap_or_else(|| snake_to_camel(&func.sig.ident.to_string()));
+        members.push((func.clone(), options, js));
+    }
+    let js_name_of = |method: &syn::LitStr| {
+        members
+            .iter()
+            .find(|(func, ..)| func.sig.ident == method.value())
+            .map(|(.., js)| js.clone())
+            .ok_or_else(|| syn::Error::new_spanned(method, "plum: no such method in this block"))
+    };
+    let mut setters = Vec::new();
+    for (_, options, _) in &members {
+        if let Some(method) = &options.set {
+            setters.push(js_name_of(method)?);
+        }
+    }
+
+    let mut actions = Vec::new();
+    let mut signatures = Vec::new();
+    let mut factory = TokenStream::new();
+    for (func, options, js) in &members {
         if options.skip || !matches!(func.vis, syn::Visibility::Public(_)) {
             continue;
         }
@@ -96,19 +122,26 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
         }
         match func.sig.inputs.first() {
             Some(FnArg::Receiver(r)) if r.reference.is_some() && r.mutability.is_none() => {
-                let js = options.js.unwrap_or_else(|| snake_to_camel(&name));
                 if options.watch {
                     let params = params(func)?;
-                    actions.push(store(func, &js, &params)?);
-                    signatures.push(store_signature(func, &js, &params));
+                    let setter = options.set.as_ref().map(&js_name_of).transpose()?;
+                    actions.push(store(func, js, &params)?);
+                    signatures.push(store_signature(func, js, &params, setter.as_deref()));
                     continue;
+                }
+                if let Some(set) = &options.set {
+                    return Err(syn::Error::new_spanned(
+                        set,
+                        "plum: `set` belongs on a #[plum(watch)] method",
+                    ));
                 }
                 if name == "dispose" || returns_handle(&func.sig.output) {
                     continue;
                 }
                 let params = params(func)?;
-                actions.push(action(func, &js, &params));
-                signatures.push(signature(func, &js, &params));
+                actions.push(action(func, js, &params));
+                // A method that writes a store is reached through `store.set`.
+                signatures.push(signature(func, js, &params, setters.contains(js)));
             }
             None | Some(FnArg::Typed(_)) if name == "new" => {
                 factory = self::factory(func, &model, &wasm, &params(func)?);
@@ -135,15 +168,15 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
             pub fn __plum_actions<V: ::ts_rs::TypeVisitor>(
                 cfg: &::ts_rs::Config,
                 visitor: &mut V,
-            ) -> [String; 5] {
-                // Members of the actions interface and of the object that
-                // implements it, then the same two for stores, then what the
-                // stores need from the wasm class.
-                let (mut sigs, mut fns) = (String::new(), String::new());
+            ) -> (Vec<(&'static str, String, String)>, String, String, String) {
+                // The actions as (name, interface member, implementation),
+                // then the interface members and implementations of the
+                // stores, then what the stores need from the wasm class.
+                let mut actions = Vec::new();
                 let (mut store_sigs, mut store_fns) = (String::new(), String::new());
                 let mut wasm_sigs = String::new();
                 #(#signatures)*
-                [sigs, fns, store_sigs, store_fns, wasm_sigs]
+                (actions, store_sigs, store_fns, wasm_sigs)
             }
         }
     })
@@ -157,20 +190,28 @@ fn take_options(func: &mut ImplItemFn) -> syn::Result<Options> {
         if !attr.path().is_ident("plum") {
             return true;
         }
-        let parsed = attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("skip") {
-                options.skip = true;
-                Ok(())
-            } else if meta.path.is_ident("watch") {
-                options.watch = true;
-                Ok(())
-            } else if meta.path.is_ident("js") {
-                options.js = Some(meta.value()?.parse::<syn::LitStr>()?.value());
-                Ok(())
-            } else {
-                Err(meta.error("plum: expected `skip`, `watch` or `js = \"...\"`"))
-            }
-        });
+        let parsed =
+            attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("skip") {
+                    options.skip = true;
+                    Ok(())
+                } else if meta.path.is_ident("watch") {
+                    options.watch = true;
+                    Ok(())
+                } else if meta.path.is_ident("js") {
+                    options.js = Some(meta.value()?.parse::<syn::LitStr>()?.value());
+                    Ok(())
+                } else if meta.path.is_ident("set") {
+                    options.set = Some(meta.value().map_err(|_| {
+                    meta.error("plum: name the method that writes this store: set = \"method\"")
+                })?.parse()?);
+                    Ok(())
+                } else {
+                    Err(meta.error(
+                        "plum: expected `skip`, `watch`, `set = \"method\"` or `js = \"...\"`",
+                    ))
+                }
+            });
         if let Err(e) = parsed {
             result = Err(e);
         }
@@ -334,7 +375,7 @@ fn store(func: &ImplItemFn, js: &str, params: &[Param]) -> syn::Result<TokenStre
     let conversions = conversions(js, params);
     let args = call_args(params);
     let body = quote_spanned! {returned.span()=>
-        let scope = ::plum_wasm::__rt::Owner::new();
+        let scope = bridge.scope();
         let source = scope.with(|| core.#name(#(#args),*));
         ::core::result::Result::Ok(bridge.watch_json_scoped(
             scope,
@@ -366,8 +407,14 @@ fn watch_name(js: &str) -> String {
 }
 
 /// The TypeScript for one `#[plum(watch)]` method. Without parameters it is
-/// a store; with parameters it is a function from arguments to a store.
-fn store_signature(func: &ImplItemFn, js: &str, params: &[Param]) -> TokenStream {
+/// a store; with parameters it is a function from arguments to a store. With
+/// a setter it is writable.
+fn store_signature(
+    func: &ImplItemFn,
+    js: &str,
+    params: &[Param],
+    setter: Option<&str>,
+) -> TokenStream {
     let ReturnType::Type(_, returned) = &func.sig.output else {
         return TokenStream::new();
     };
@@ -381,7 +428,11 @@ fn store_signature(func: &ImplItemFn, js: &str, params: &[Param]) -> TokenStream
         .collect();
     let types = params.iter().map(|p| ts_name(&p.ts));
     let list = labels.join(", ");
-    let plain = params.is_empty();
+    let (kind, make) = match setter {
+        Some(_) => ("WritableAtom", "writable"),
+        None => ("ReadableAtom", "readable"),
+    };
+    let setter = setter.unwrap_or_default();
     quote! {
         {
             let value = {
@@ -390,19 +441,24 @@ fn store_signature(func: &ImplItemFn, js: &str, params: &[Param]) -> TokenStream
             };
             let params: Vec<String> = vec![#(format!("{}: {}", #labels, #types)),*];
             let params = params.join(", ");
-            if #plain {
-                store_sigs.push_str(&format!("  {}: ReadableAtom<{value}>;\n", #js));
-                store_fns.push_str(&format!(
-                    "      {}: readable((cb) => model.{}(cb), unwatch),\n",
-                    #js, #watch
-                ));
+            // `key, ` in front of the callback or the value, or nothing.
+            let lead = if #list.is_empty() { String::new() } else { format!("{}, ", #list) };
+            let write = if #setter.is_empty() {
+                String::new()
+            } else {
+                format!(", (v) => model.{}({lead}v)", #setter)
+            };
+            let store = format!(
+                "{}<{value}>((cb) => model.{}({lead}cb), unwatch{write})",
+                #make, #watch
+            );
+            if #list.is_empty() {
+                store_sigs.push_str(&format!("  {}: {}<{value}>;\n", #js, #kind));
+                store_fns.push_str(&format!("      {}: {store},\n", #js));
                 wasm_sigs.push_str(&format!("  {}(cb: (v: {value}) => void): number;\n", #watch));
             } else {
-                store_sigs.push_str(&format!("  {}({params}): ReadableAtom<{value}>;\n", #js));
-                store_fns.push_str(&format!(
-                    "      {0}: family<[{params}], {value}>(({1}, cb) => model.{2}({1}, cb), unwatch),\n",
-                    #js, #list, #watch
-                ));
+                store_sigs.push_str(&format!("  {}({params}): {}<{value}>;\n", #js, #kind));
+                store_fns.push_str(&format!("      {}: family(({params}) => {store}),\n", #js));
                 wasm_sigs.push_str(&format!(
                     "  {}({params}, cb: (v: {value}) => void): number;\n",
                     #watch
@@ -439,9 +495,10 @@ fn factory(func: &ImplItemFn, model: &Ident, wasm: &Ident, params: &[Param]) -> 
     }
 }
 
-/// Appends one action to the TypeScript interface and to the object that
-/// implements it. Runs inside the export test, where ts-rs can name types.
-fn signature(func: &ImplItemFn, js: &str, params: &[Param]) -> TokenStream {
+/// Records one action for the TypeScript binding. Runs inside the export
+/// test, where ts-rs can name types. A method that writes a store is only
+/// declared on the wasm class.
+fn signature(func: &ImplItemFn, js: &str, params: &[Param], is_setter: bool) -> TokenStream {
     let labels: Vec<String> = params
         .iter()
         .map(|p| snake_to_camel(&p.name.to_string()))
@@ -455,8 +512,13 @@ fn signature(func: &ImplItemFn, js: &str, params: &[Param]) -> TokenStream {
     quote! {
         {
             let params: Vec<String> = vec![#(format!("{}: {}", #labels, #types)),*];
-            sigs.push_str(&format!("  {}({}): {};\n", #js, params.join(", "), #ret));
-            fns.push_str(&format!("      {0}: ({1}) => model.{0}({1}),\n", #js, #list));
+            let sig = format!("  {}({}): {};\n", #js, params.join(", "), #ret);
+            if #is_setter {
+                wasm_sigs.push_str(&sig);
+            } else {
+                let implementation = format!("      {0}: ({1}) => model.{0}({1}),\n", #js, #list);
+                actions.push((#js, sig, implementation));
+            }
         }
     }
 }

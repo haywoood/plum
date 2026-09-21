@@ -21,6 +21,23 @@ struct Watch<'a> {
     js_name: String,
     /// The key in the generated stores object, e.g. `todos`.
     store_key: String,
+    setter: Setter,
+}
+
+/// How JS writes to a store, if it can.
+enum Setter {
+    None,
+    /// `#[plum(watch, set)]`: the field itself is set.
+    Direct,
+    /// `#[plum(watch, set = "method")]`: that method of the model is called.
+    Method(String),
+}
+
+#[derive(Default)]
+struct FieldOptions {
+    watch: bool,
+    js: Option<String>,
+    set: Option<Option<String>>,
 }
 
 pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
@@ -56,15 +73,22 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     for field in fields {
         let name = field.ident.as_ref().expect("named field");
         for attr in field.attrs.iter().filter(|a| a.path().is_ident("plum")) {
-            if let Some(js) = parse_watch(attr)? {
-                let base = js.unwrap_or_else(|| name.to_string());
-                watches.push(Watch {
-                    field: name,
-                    ty: &field.ty,
-                    js_name: format!("watch{}", pascal_case(&base)),
-                    store_key: lower_first(&snake_to_camel(&base)),
-                });
+            let options = parse_field(attr)?;
+            if !options.watch {
+                continue;
             }
+            let base = options.js.unwrap_or_else(|| name.to_string());
+            watches.push(Watch {
+                field: name,
+                ty: &field.ty,
+                js_name: format!("watch{}", pascal_case(&base)),
+                store_key: lower_first(&snake_to_camel(&base)),
+                setter: match options.set {
+                    None => Setter::None,
+                    Some(None) => Setter::Direct,
+                    Some(Some(method)) => Setter::Method(method),
+                },
+            });
         }
     }
 
@@ -85,6 +109,33 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
             }
         }
     });
+
+    // `#[plum(watch, set)]`: JS sets the field itself. The name is one no
+    // action can have.
+    let set_methods = watches
+        .iter()
+        .filter(|w| matches!(w.setter, Setter::Direct))
+        .map(|w| {
+            let method = format_ident!("__plum_set_{}", w.field);
+            let js_name = direct_setter_name(w);
+            let (field, ty, key) = (w.field, w.ty, &w.store_key);
+            let body = quote_spanned! {ty.span()=>
+                let value: <#ty as ::leptos::reactive::traits::Set>::Value =
+                    ::plum_wasm::__rt::arg(#key, "value", value)?;
+                ::leptos::reactive::traits::Set::set(&self.core.#field, value);
+                self.bridge.flush();
+                ::core::result::Result::Ok(())
+            };
+            quote! {
+                #[::wasm_bindgen::prelude::wasm_bindgen(js_name = #js_name)]
+                pub fn #method(
+                    &self,
+                    value: ::wasm_bindgen::JsValue,
+                ) -> ::core::result::Result<(), ::wasm_bindgen::JsValue> {
+                    #body
+                }
+            }
+        });
 
     let export = export_test(model, &model_name, &watches);
     let watched = watches.iter().map(|w| w.field);
@@ -129,6 +180,8 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
         impl #wasm {
             #(#watch_methods)*
 
+            #(#set_methods)*
+
             pub fn unwatch(&self, id: u32) {
                 self.bridge.unwatch(id);
             }
@@ -150,23 +203,32 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     })
 }
 
-/// `#[plum(watch)]` or `#[plum(watch, js = "Name")]`. Returns `None` for a
-/// `#[plum(...)]` attribute that is not a watch.
-fn parse_watch(attr: &syn::Attribute) -> syn::Result<Option<Option<String>>> {
-    let mut watch = false;
-    let mut js = None;
+/// `#[plum(watch)]`, with `js = "Name"`, `set` or `set = "method"`.
+fn parse_field(attr: &syn::Attribute) -> syn::Result<FieldOptions> {
+    let mut options = FieldOptions::default();
     attr.parse_nested_meta(|meta| {
         if meta.path.is_ident("watch") {
-            watch = true;
+            options.watch = true;
             Ok(())
         } else if meta.path.is_ident("js") {
-            js = Some(meta.value()?.parse::<syn::LitStr>()?.value());
+            options.js = Some(meta.value()?.parse::<syn::LitStr>()?.value());
+            Ok(())
+        } else if meta.path.is_ident("set") {
+            options.set = Some(match meta.value() {
+                Ok(value) => Some(value.parse::<syn::LitStr>()?.value()),
+                Err(_) => None,
+            });
             Ok(())
         } else {
-            Err(meta.error("plum: expected `watch` or `js = \"...\"`"))
+            Err(meta.error("plum: expected `watch`, `set`, `set = \"method\"` or `js = \"...\"`"))
         }
     })?;
-    Ok(watch.then_some(js))
+    Ok(options)
+}
+
+/// "plumSetInputText": the wasm method behind `#[plum(watch, set)]`.
+fn direct_setter_name(watch: &Watch) -> String {
+    format!("plumSet{}", &watch.js_name["watch".len()..])
 }
 
 /// The test that writes `plum_gen/<model>.ts`. It runs with real type
@@ -181,6 +243,19 @@ fn export_test(model: &Ident, model_name: &str, watches: &[Watch]) -> TokenStrea
     let values = watches.iter().map(|w| {
         let ty = w.ty;
         quote_spanned! {ty.span()=> <#ty as ::leptos::reactive::traits::Get>::Value }
+    });
+    // The method JS calls to write the store, and whether it is an action
+    // of the model (which then stops being listed as one).
+    let writers = watches.iter().map(|w| match &w.setter {
+        Setter::None => quote!(None),
+        Setter::Direct => {
+            let name = direct_setter_name(w);
+            quote!(Some((#name, false)))
+        }
+        Setter::Method(method) => {
+            let name = snake_to_camel(method);
+            quote!(Some((#name, true)))
+        }
     });
 
     quote! {
@@ -206,11 +281,15 @@ fn export_test(model: &Ident, model_name: &str, watches: &[Watch]) -> TokenStrea
                 }
             }
 
-            // `#[plum_actions]` defines an inherent `__plum_actions`, which
-            // takes precedence over this; a model without actions gets none.
+            // What `#[plum_actions]` contributes: the actions as (name,
+            // interface member, implementation), then the interface members
+            // and implementations of its stores, then what those stores need
+            // from the wasm class. Its inherent `__plum_actions` takes
+            // precedence over this trait; a model without one gets nothing.
+            type Actions = (Vec<(&'static str, String, String)>, String, String, String);
             #[allow(dead_code)]
             trait NoActions {
-                fn __plum_actions<V: TypeVisitor>(_: &Config, _: &mut V) -> [String; 5] {
+                fn __plum_actions<V: TypeVisitor>(_: &Config, _: &mut V) -> Actions {
                     Default::default()
                 }
             }
@@ -221,38 +300,73 @@ fn export_test(model: &Ident, model_name: &str, watches: &[Watch]) -> TokenStrea
             let mut named = ::std::collections::BTreeMap::new();
             let mut visitor = Named(&cfg, &mut named);
 
-            let stores: Vec<(&str, &str, String)> = vec![#((
+            let stores: Vec<(&str, &str, String, Option<(&str, bool)>)> = vec![#((
                 #keys,
                 #js_names,
                 {
                     visitor.visit::<#values>();
                     <#values as TS>::name(&cfg)
                 },
+                #writers,
             )),*];
-            let [action_sigs, action_fns, store_sigs, store_fns, wasm_sigs] =
+            let (actions, store_sigs, store_fns, mut wasm_sigs): Actions =
                 <#model>::__plum_actions(&cfg, &mut visitor);
+
+            // A method that writes a store is reached through `store.set`.
+            let is_setter = |name: &str| {
+                stores.iter().any(|(.., writer)| *writer == Some((name, true)))
+            };
+            let (mut action_sigs, mut action_fns) = (String::new(), String::new());
+            for (name, sig, implementation) in &actions {
+                if is_setter(name) {
+                    wasm_sigs.push_str(sig);
+                } else {
+                    action_sigs.push_str(sig);
+                    action_fns.push_str(implementation);
+                }
+            }
 
             let mut out = String::from(concat!(
                 "// AUTO-GENERATED by plum from `", #model_name, "` — do not edit.\n",
-                "import { atom, onMount, type ReadableAtom } from \"nanostores\";\n\n",
+                "import { atom, onMount, type ReadableAtom, type WritableAtom } from \"nanostores\";\n\n",
             ));
             for decl in named.values() {
                 writeln!(out, "export {decl}\n").unwrap();
             }
             writeln!(out, "export interface {}Stores {{", #pascal).unwrap();
-            for (key, _, ty) in &stores {
-                writeln!(out, "  {key}: ReadableAtom<{ty}>;").unwrap();
+            for (key, _, ty, writer) in &stores {
+                let kind = if writer.is_some() { "WritableAtom" } else { "ReadableAtom" };
+                writeln!(out, "  {key}: {kind}<{ty}>;").unwrap();
             }
             writeln!(out, "{store_sigs}}}\n\nexport interface {}Actions {{\n{action_sigs}}}\n", #pascal).unwrap();
             writeln!(out, "/** What bind{0} needs from the wasm class. */", #pascal).unwrap();
             writeln!(out, "interface {0}Wasm extends {0}Actions {{", #pascal).unwrap();
-            for (_, watch, ty) in &stores {
+            for (_, watch, ty, writer) in &stores {
                 writeln!(out, "  {watch}(cb: (v: {ty}) => void): number;").unwrap();
+                if let Some((setter, false)) = writer {
+                    writeln!(out, "  {setter}(value: {ty}): void;").unwrap();
+                }
             }
             out.push_str(&wasm_sigs);
+            out.push_str("  unwatch(id: number): void;\n  dispose(): void;\n}\n\n");
+
+            let mut body = String::new();
+            for (key, watch, ty, writer) in &stores {
+                match writer {
+                    None => writeln!(
+                        body,
+                        "      {key}: readable<{ty}>((cb) => model.{watch}(cb), unwatch),"
+                    ),
+                    Some((setter, _)) => writeln!(
+                        body,
+                        "      {key}: writable<{ty}>((cb) => model.{watch}(cb), unwatch, (v) => model.{setter}(v)),"
+                    ),
+                }
+                .unwrap();
+            }
+            body.push_str(&store_fns);
+
             out.push_str(concat!(
-                "  unwatch(id: number): void;\n",
-                "  dispose(): void;\n}\n\n",
                 "// A store is subscribed in Rust while it has listeners. Rust calls back\n",
                 "// with the current value inside watch*(), so a store that is listened to\n",
                 "// or read never holds `undefined`.\n",
@@ -268,19 +382,36 @@ fn export_test(model: &Ident, model_name: &str, watches: &[Watch]) -> TokenStrea
                 "  return store;\n",
                 "}\n\n",
             ));
-            if store_fns.contains("family<") {
+            if body.contains("writable<") {
+                out.push_str(concat!(
+                    "// `set` on a writable store goes to Rust. The new value comes back\n",
+                    "// through the subscription, before `set` returns.\n",
+                    "function writable<T>(\n",
+                    "  watch: (cb: (v: T) => void) => number,\n",
+                    "  unwatch: (id: number) => void,\n",
+                    "  write: (v: T) => void,\n",
+                    "): WritableAtom<T> {\n",
+                    "  const store = atom<T>(undefined as T);\n",
+                    "  const receive = store.set;\n",
+                    "  store.set = write;\n",
+                    "  onMount(store, () => {\n",
+                    "    const id = watch(receive);\n",
+                    "    return () => unwatch(id);\n",
+                    "  });\n",
+                    "  return store;\n",
+                    "}\n\n",
+                ));
+            }
+            if body.contains("family(") {
                 out.push_str(concat!(
                     "// Stores that take arguments: the same arguments give the same store.\n",
-                    "function family<A extends unknown[], T>(\n",
-                    "  watch: (...args: [...A, (v: T) => void]) => number,\n",
-                    "  unwatch: (id: number) => void,\n",
-                    "): (...args: A) => ReadableAtom<T> {\n",
-                    "  const stores = new Map<string, ReadableAtom<T>>();\n",
+                    "function family<A extends unknown[], S>(make: (...args: A) => S): (...args: A) => S {\n",
+                    "  const stores = new Map<string, S>();\n",
                     "  return (...args) => {\n",
                     "    const key = JSON.stringify(args);\n",
                     "    let store = stores.get(key);\n",
-                    "    if (!store) {\n",
-                    "      store = readable((cb) => watch(...args, cb), unwatch);\n",
+                    "    if (store === undefined) {\n",
+                    "      store = make(...args);\n",
                     "      stores.set(key, store);\n",
                     "    }\n",
                     "    return store;\n",
@@ -288,18 +419,10 @@ fn export_test(model: &Ident, model_name: &str, watches: &[Watch]) -> TokenStrea
                     "}\n\n",
                 ));
             }
-            writeln!(
-                out,
-                "export function bind{0}(model: {0}Wasm): {{\n  stores: {0}Stores;\n  actions: {0}Actions;\n  dispose: () => void;\n}} {{\n  const unwatch = (id: number) => model.unwatch(id);\n  return {{\n    stores: {{",
-                #pascal
-            )
-            .unwrap();
-            for (key, watch, _) in &stores {
-                writeln!(out, "      {key}: readable((cb) => model.{watch}(cb), unwatch),").unwrap();
-            }
             write!(
                 out,
-                "{store_fns}    }},\n    actions: {{\n{action_fns}    }},\n    dispose: () => model.dispose(),\n  }};\n}}\n"
+                "export function bind{0}(model: {0}Wasm): {{\n  stores: {0}Stores;\n  actions: {0}Actions;\n  dispose: () => void;\n}} {{\n  const unwatch = (id: number) => model.unwatch(id);\n  return {{\n    stores: {{\n{body}    }},\n    actions: {{\n{action_fns}    }},\n    dispose: () => model.dispose(),\n  }};\n}}\n",
+                #pascal
             )
             .unwrap();
 
