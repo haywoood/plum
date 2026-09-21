@@ -56,10 +56,10 @@ reactive_graph = { version = "0.2", features = ["effects"] }
 any_spawner = "0.3" # generated code for `async fn` actions spawns through it
 serde = { version = "1", features = ["derive"] }
 ts-rs = "12"        # for structs and enums that appear in watched fields
-plum-macro = { git = "<this repository>" }
+plum-macro = { git = "https://github.com/haywoood/plum" }
 
 # wasm build only
-plum-wasm = { git = "<this repository>", optional = true }
+plum-wasm = { git = "https://github.com/haywoood/plum", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }
 serde_json = { version = "1", optional = true }
@@ -159,10 +159,12 @@ What is exposed:
 
 Action parameters and return values:
 
-- Numbers, `bool`, `String` and `&str` go through wasm-bindgen unchanged.
+- `i32`, `u32`, `i64`, `u64`, `f32`, `f64`, `bool`, `String` and `&str` go
+  through wasm-bindgen unchanged.
 - Any other parameter type is passed from JS as a string and parsed with
   serde. In practice that means enums with unit variants:
-  `actions.setFilter("completed")`. Struct parameters do not work yet.
+  `actions.setFilter("completed")`. Structs, `Option`, `Vec` and the other
+  integer widths (`usize`, `u8`, ...) do not work as parameters yet.
 - Any other return type is converted with serde-wasm-bindgen. Its TypeScript
   type is `any`.
 - A call to an `async fn` action returns nothing, immediately. The future is
