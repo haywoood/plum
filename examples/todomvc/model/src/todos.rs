@@ -11,8 +11,9 @@
 //! - the filter is model state (`All` / `Active` / `Completed`), and so is
 //!   everything the view would otherwise keep for itself: the new-todo text,
 //!   which row is being edited, and the text of that edit;
-//! - persistence: `load()` reads from storage, `save()` writes to storage,
-//!   and an autosave `Effect` triggers `save` whenever the list is dirtied.
+//! - persistence: loading and saving are Leptos `Action`s. `load()` and
+//!   `save()` dispatch them, an autosave `Effect` dispatches a save whenever
+//!   the list is dirtied, and `saving` / `last_error` are derived from them.
 
 use leptos::prelude::*;
 use reactive_graph::effect::Effect;
@@ -65,7 +66,6 @@ pub struct Todos {
     #[plum(watch)]
     filters: Memo<Vec<Filter>>,
     next_id: RwSignal<i32>,
-    loaded: RwSignal<bool>,
     #[plum(watch)]
     remaining: Memo<i32>,
     #[plum(watch)]
@@ -76,10 +76,12 @@ pub struct Todos {
     all_done: Memo<bool>,
     #[plum(watch)]
     visible: Memo<Vec<Todo>>,
+    /// True while a save is in flight.
     #[plum(watch)]
-    saving: RwSignal<bool>,
+    saving: Memo<bool>,
+    /// What went wrong in the last save, or else in the load.
     #[plum(watch)]
-    last_error: RwSignal<Option<String>>,
+    last_error: Memo<Option<String>>,
     /// Text of the new-todo field.
     #[plum(watch)]
     input_text: RwSignal<String>,
@@ -90,7 +92,8 @@ pub struct Todos {
     edit_text: RwSignal<String>,
     dirty: RwSignal<bool>,
     autosave: Effect<LocalStorage>,
-    storage: Storage,
+    load_action: Action<(), Result<(), String>>,
+    save_action: Action<Vec<Todo>, Result<(), String>>,
 }
 
 #[plum_actions]
@@ -110,8 +113,6 @@ impl Todos {
         let next_id = RwSignal::new(1);
         let loaded = RwSignal::new(false);
         let dirty = RwSignal::new(false);
-        let saving = RwSignal::new(false);
-        let last_error = RwSignal::new(None);
         let input_text = RwSignal::new(String::new());
         let editing_id = RwSignal::new(None);
         let edit_text = RwSignal::new(String::new());
@@ -133,26 +134,37 @@ impl Todos {
             }
         });
 
-        // Autosave: a Leptos effect that watches the list; when data was
-        // dirtied after a successful load and no save is in flight, it spawns
-        // an async save task.
-        let autosave = Effect::new({
+        // `new_local` because the wasm storage futures are not `Send`.
+        let load_action = Action::new_local({
             let storage = storage.clone();
-            move |_prev: Option<()>| {
-                let _ = list.get();
-                if loaded.get() && dirty.get() && !saving.get() {
-                    dirty.set(false);
-                    saving.set(true);
-                    let storage = storage.clone();
-                    any_spawner::Executor::spawn_local(async move {
-                        let todos = list.get();
-                        let result = (storage.save)(todos).await;
-                        saving.set(false);
-                        if let Err(e) = result {
-                            last_error.set(Some(e));
-                        }
-                    });
+            move |_: &()| {
+                let loading = (storage.load)();
+                async move {
+                    let todos = loading.await?;
+                    let max_id = todos.iter().map(|t| t.id).max().unwrap_or(0);
+                    next_id.set(max_id + 1);
+                    list.set(todos);
+                    loaded.set(true);
+                    Ok(())
                 }
+            }
+        });
+        let save_action = Action::new_local(move |todos: &Vec<Todo>| (storage.save)(todos.clone()));
+
+        let saving = save_action.pending();
+        let (loaded_value, saved_value) = (load_action.value(), save_action.value());
+        let last_error = Memo::new(move |_| {
+            let failure = |value: Option<Result<(), String>>| value.and_then(Result::err);
+            failure(saved_value.get()).or_else(|| failure(loaded_value.get()))
+        });
+
+        // Autosave: when the list was dirtied after a successful load and no
+        // save is in flight, dispatch one. It runs again when `saving` clears.
+        let autosave = Effect::new(move |_prev: Option<()>| {
+            let todos = list.get();
+            if loaded.get() && dirty.get() && !saving.get() {
+                dirty.set(false);
+                save_action.dispatch_local(todos);
             }
         });
 
@@ -161,7 +173,6 @@ impl Todos {
             filter,
             filters,
             next_id,
-            loaded,
             remaining,
             completed,
             total,
@@ -174,44 +185,22 @@ impl Todos {
             edit_text,
             dirty,
             autosave,
-            storage,
+            load_action,
+            save_action,
         }
     }
 
-    /// Loads the list from the storage backend.
-    pub async fn load(&self) -> Result<Vec<Todo>, String> {
-        match (self.storage.load)().await {
-            Ok(todos) => {
-                let max_id = todos.iter().map(|t| t.id).max().unwrap_or(0);
-                self.next_id.set(max_id + 1);
-                self.list.set(todos.clone());
-                self.loaded.set(true);
-                Ok(todos)
-            }
-            Err(e) => {
-                self.last_error.set(Some(e.clone()));
-                Err(e)
-            }
-        }
+    /// Starts loading the list from storage. `todos` changes when it arrives.
+    pub fn load(&self) {
+        self.load_action.dispatch_local(());
     }
 
-    /// Saves the list to the storage backend.
-    pub async fn save(&self) -> Result<(), String> {
-        if self.saving.get() {
-            return Ok(());
+    /// Starts a save, unless one is running. `saving` and `last_error` report
+    /// how it goes.
+    pub fn save(&self) {
+        if !self.saving.get() {
+            self.save_action.dispatch_local(self.list.get());
         }
-        self.saving.set(true);
-        let result = (self.storage.save)(self.list.get()).await;
-        self.saving.set(false);
-        match &result {
-            Ok(()) => {
-                self.last_error.set(None);
-            }
-            Err(e) => {
-                self.last_error.set(Some(e.clone()));
-            }
-        }
-        result
     }
 
     /// Adds a todo (trimmed; empty text is ignored). Returns the new id, or
@@ -407,7 +396,8 @@ mod tests {
     fn crud_and_memos() {
         let (storage, _) = mem_storage(false);
         let t = Todos::with_storage(storage);
-        futures::executor::block_on(t.load()).unwrap();
+        t.load();
+        crate::runtime::pump();
         assert!(t.list.get().is_empty());
 
         let a = t.add("write the adapter");
@@ -505,7 +495,8 @@ mod tests {
     fn autosave_writes_back_through_the_seam() {
         let (storage, mem) = mem_storage(false);
         let t = Todos::with_storage(storage);
-        futures::executor::block_on(t.load()).unwrap();
+        t.load();
+        crate::runtime::pump();
         assert!(t.list.get().is_empty());
 
         t.add("persist me");
@@ -526,7 +517,8 @@ mod tests {
         let (storage, mem) = mem_storage(false);
         *mem.lock().unwrap() = sample();
         let t = Todos::with_storage(storage);
-        futures::executor::block_on(t.load()).unwrap();
+        t.load();
+        crate::runtime::pump();
         assert_eq!(t.list.get(), sample());
         assert_eq!(t.remaining.get(), 2);
         assert_eq!(t.add("d"), 4, "new ids continue after the loaded ones");
@@ -536,7 +528,8 @@ mod tests {
     fn save_failure_surfaces_in_last_error() {
         let (storage, _) = mem_storage(true);
         let t = Todos::with_storage(storage);
-        futures::executor::block_on(t.load()).unwrap();
+        t.load();
+        crate::runtime::pump();
         t.add("boom");
         crate::runtime::pump();
         assert_eq!(t.last_error.get().as_deref(), Some("disk full"));
@@ -548,7 +541,8 @@ mod tests {
     fn dispose_stops_autosave_and_aborts() {
         let (storage, mem) = mem_storage(false);
         let t = Todos::with_storage(storage);
-        futures::executor::block_on(t.load()).unwrap();
+        t.load();
+        crate::runtime::pump();
         t.dispose();
         t.add("after dispose");
         crate::runtime::pump();

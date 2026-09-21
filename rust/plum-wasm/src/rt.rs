@@ -7,7 +7,6 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use wasm_bindgen::JsValue;
 
-pub use any_spawner;
 pub use js_sys;
 
 /// Converts an argument that arrived from JS. A value of the wrong shape

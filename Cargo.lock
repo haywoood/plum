@@ -1525,7 +1525,6 @@ name = "todomvc-model"
 version = "0.1.0"
 dependencies = [
  "any_spawner",
- "futures",
  "js-sys",
  "leptos",
  "plum-macro",

@@ -23,4 +23,3 @@ serde_json = "1"
 ts-rs = "12"
 plum-wasm = { path = "rust/plum-wasm" }
 plum-macro = { path = "rust/plum-macro" }
-futures = "0.3"

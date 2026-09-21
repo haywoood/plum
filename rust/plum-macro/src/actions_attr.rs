@@ -8,6 +8,9 @@
 //!
 //! Every argument arrives as a `JsValue` and is deserialized into the type
 //! the method declares, so the macro never has to recognise a type by name.
+//!
+//! Actions are synchronous. Async work belongs in a Leptos `Action` that a
+//! plain method dispatches; its `pending()` and `value()` are watchable.
 
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote, quote_spanned};
@@ -78,6 +81,15 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
             continue;
         }
         let name = func.sig.ident.to_string();
+        let exported = name == "new" || matches!(func.sig.inputs.first(), Some(FnArg::Receiver(_)));
+        if let (true, Some(asyncness)) = (exported, &func.sig.asyncness) {
+            return Err(syn::Error::new_spanned(
+                asyncness,
+                "plum: an `async fn` cannot be exported. Put the work in a Leptos `Action`, \
+                 dispatch it from a plain method and watch its `pending()` and `value()`; \
+                 or mark this method #[plum(skip)]",
+            ));
+        }
         match func.sig.inputs.first() {
             Some(FnArg::Receiver(r)) if r.reference.is_some() && r.mutability.is_none() => {
                 if name == "dispose" || returns_handle(&func.sig.output) {
@@ -241,45 +253,32 @@ fn action(func: &ImplItemFn, js: &str, params: &[Param]) -> TokenStream {
         ::wasm_bindgen::JsValue::UNDEFINED
     ));
 
-    let body = if func.sig.asyncness.is_some() {
-        // The call returns at once. What the future does shows up in stores.
-        let run = match func.sig.output {
-            ReturnType::Default => quote!(core.#name(#(#args),*).await;),
-            ReturnType::Type(..) => quote!(let _ = core.#name(#(#args),*).await;),
-        };
-        quote! {
-            let core = ::std::rc::Rc::clone(core);
-            ::plum_wasm::__rt::any_spawner::Executor::spawn_local(async move { #run });
+    let body = match returned(&func.sig.output) {
+        Returned::Nothing => quote! {
+            core.#name(#(#args),*);
+            bridge.flush();
             #undefined
-        }
-    } else {
-        match returned(&func.sig.output) {
-            Returned::Nothing => quote! {
-                core.#name(#(#args),*);
-                bridge.flush();
-                #undefined
-            },
-            Returned::Value(_) => quote! {
+        },
+        Returned::Value(_) => quote! {
+            let out = core.#name(#(#args),*);
+            bridge.flush();
+            ::plum_wasm::__rt::ret(#js, &out)
+        },
+        Returned::Fallible(ok) => {
+            let ok = match ok {
+                Some(_) => quote!(::plum_wasm::__rt::ret(#js, &value)),
+                None => undefined.clone(),
+            };
+            quote! {
                 let out = core.#name(#(#args),*);
                 bridge.flush();
-                ::plum_wasm::__rt::ret(#js, &out)
-            },
-            Returned::Fallible(ok) => {
-                let ok = match ok {
-                    Some(_) => quote!(::plum_wasm::__rt::ret(#js, &value)),
-                    None => undefined.clone(),
-                };
-                quote! {
-                    let out = core.#name(#(#args),*);
-                    bridge.flush();
-                    match out {
-                        ::core::result::Result::Ok(value) => {
-                            let _ = &value;
-                            #ok
-                        }
-                        ::core::result::Result::Err(e) => {
-                            ::core::result::Result::Err(::plum_wasm::__rt::err(e))
-                        }
+                match out {
+                    ::core::result::Result::Ok(value) => {
+                        let _ = &value;
+                        #ok
+                    }
+                    ::core::result::Result::Err(e) => {
+                        ::core::result::Result::Err(::plum_wasm::__rt::err(e))
                     }
                 }
             }
@@ -293,7 +292,6 @@ fn action(func: &ImplItemFn, js: &str, params: &[Param]) -> TokenStream {
             #(#names: ::wasm_bindgen::JsValue),*
         ) -> ::core::result::Result<::wasm_bindgen::JsValue, ::wasm_bindgen::JsValue> {
             let (core, bridge) = self.__plum();
-            let _ = bridge;
             #conversions
             #body
         }
@@ -335,13 +333,9 @@ fn signature(func: &ImplItemFn, js: &str, params: &[Param]) -> TokenStream {
         .map(|p| snake_to_camel(&p.name.to_string()))
         .collect();
     let types = params.iter().map(|p| ts_name(&p.ts));
-    let ret = if func.sig.asyncness.is_some() {
-        quote!(String::from("void"))
-    } else {
-        match returned(&func.sig.output) {
-            Returned::Nothing | Returned::Fallible(None) => quote!(String::from("void")),
-            Returned::Value(ty) | Returned::Fallible(Some(ty)) => ts_name(ty),
-        }
+    let ret = match returned(&func.sig.output) {
+        Returned::Nothing | Returned::Fallible(None) => quote!(String::from("void")),
+        Returned::Value(ty) | Returned::Fallible(Some(ty)) => ts_name(ty),
     };
     let list = labels.join(", ");
     quote! {

@@ -106,6 +106,9 @@ pub struct Todos {
     remaining: Memo<i32>,
     #[plum(watch)]
     by_day: Memo<HashMap<String, Vec<Todo>>>,
+    #[plum(watch)]
+    saving: Memo<bool>, // save.pending()
+    save: Action<Vec<Todo>, Result<(), String>>,
     next_id: RwSignal<i32>, // not watched, never leaves Rust
 }
 
@@ -116,7 +119,7 @@ impl Todos {
     pub fn add(&self, text: &str) -> i32 { /* ... */ }
     pub fn set_filter(&self, filter: Filter) { self.filter.set(filter); }
     pub fn import(&self, todos: Vec<Todo>) -> Result<(), String> { /* ... */ }
-    pub async fn load(&self) -> Result<(), String> { /* ... */ }
+    pub fn save(&self) { self.save.dispatch_local(self.list.get()); }
 
     #[plum(skip)]
     pub fn debug_dump(&self) -> String { /* stays in Rust */ }
@@ -159,10 +162,13 @@ How actions behave:
 - A returned `Err` is thrown as a JS `Error`. `Ok(value)` returns the value.
 - `None` is `null` in both directions, and `undefined` is accepted for an
   `Option` parameter.
-- A call to an `async fn` action returns nothing, immediately. The future is
-  spawned on the Leptos executor and its result is dropped. Report progress
-  and failure through signals, as the example does with `saving` and
-  `last_error`.
+- Actions are synchronous. Async work goes in a Leptos `Action` that a plain
+  method dispatches. Its `pending()`, `value()`, `input()` and `version()`
+  implement `Get`, so they can be watched like any other field: `pending` is
+  already `true` when the dispatching call returns, and the result arrives in
+  a store. The example loads and saves this way. A `pub async fn` in the
+  block is a compile error that says so. On wasm, futures that touch JS are
+  not `Send`, so use `Action::new_local` and `dispatch_local`.
 
 ### 4. Build
 
@@ -279,7 +285,6 @@ the top level of a module.
 
 ## Not there yet
 
-- Awaiting an `async fn` action from JS
 - Subscribing lazily, only when a store has listeners
 - Sending less than the whole value when a large `Vec` changes
 - Releases on crates.io

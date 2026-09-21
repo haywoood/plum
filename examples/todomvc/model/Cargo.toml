@@ -41,5 +41,3 @@ plum = [
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = { workspace = true }
 
-[dev-dependencies]
-futures = { workspace = true }
