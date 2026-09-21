@@ -325,8 +325,8 @@ the top level of a module.
 ## State shared across the platform
 
 Not part of plum, but something it makes possible, and the example does it.
-`examples/todomvc/model/src/platform_data.rs` is a model that holds named,
-reactive JSON values:
+`examples/todomvc/model/src/platform_data.rs` is a service that keeps named
+values for whoever is on the page:
 
 ```ts
 platformdata.createStore("cart/state", { items: 0 });
@@ -334,22 +334,24 @@ const cart = useStore(platformdata.getStore<Cart>("cart/state"));
 platformdata.getStore<Cart>("cart/state").set({ items: 1 });
 ```
 
+- The data is ad hoc. Teams create the stores they need, and the service
+  neither knows nor checks what is in them: a value is JSON, and the type
+  parameter of `getStore` is the caller's claim, not a check.
 - `getStore(name)` is a store that takes an argument, so the same name gives
   the same store to everyone, and it can be subscribed to before the store
-  has been created.
-- A model written in Rust defines its stores with a type, and the platform
-  refuses a write of any other shape, from anyone. The todos model keeps all
-  of its state there, under its own name, and is itself only CRUD logic and
-  lenses over it. Code with no Rust model, such as a microfrontend, creates
-  untyped stores from JS.
-- Models find the platform data through Leptos context.
+  has been created. Creating a name twice throws.
+- Rust models are clients like any other, and find the service through
+  Leptos context. The todos model keeps all of its state there under its
+  own name, reads it back as Rust types, and is itself only CRUD logic and
+  what is computed from those values. A value it cannot read counts as
+  empty.
 
 Two things to know before building on this. Every write crosses into wasm
-and back as JSON, which suits state that Rust should see, validate or
-persist, and does not suit large values that change on every keystroke. And
-"the same name gives the same store" only holds if every microfrontend uses
-one instance of the package, so it has to be a shared module (an import map
-or the bundler's equivalent), not bundled into each of them.
+and back as JSON, which is fine for state and wrong for large values that
+change on every keystroke. And "the same name gives the same store" only
+holds if every microfrontend uses one instance of the package, so it has to
+be a shared module (an import map or the bundler's equivalent), not bundled
+into each of them.
 
 ## Not there yet
 

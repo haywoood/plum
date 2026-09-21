@@ -1,9 +1,10 @@
 //! The TodoMVC model: CRUD logic and computed lenses over platform data.
 //!
 //! The state itself (the list, the filter, the text being typed, which row is
-//! being edited) lives in [`PlatformData`] under this model's name, as typed
-//! stores that anyone on the platform can read. What is here is what gives
-//! that state meaning:
+//! being edited) lives in [`PlatformData`] under this model's name, where
+//! anyone on the platform can read it. The platform does not know what these
+//! values are; this model does, and reads them back as Rust types. What is
+//! here is what gives that state meaning:
 //!
 //! - lenses: the list and filter read back as Rust types, and everything
 //!   computed from them (`remaining`, `visible`, the filter bar, and every
@@ -65,6 +66,20 @@ pub type SaveFuture =
 pub struct Storage {
     pub load: std::sync::Arc<dyn Fn() -> LoadFuture>,
     pub save: std::sync::Arc<dyn Fn(Vec<Todo>) -> SaveFuture>,
+}
+
+/// A platform store read as a `T`. The platform holds whatever it was given,
+/// so anything that is not a `T` reads as `T::default()`.
+fn lens<T>(data: PlatformData, key: &str) -> Memo<T>
+where
+    T: serde::de::DeserializeOwned + Default + PartialEq + Clone + Send + Sync + 'static,
+{
+    let value = data.get_store(key);
+    Memo::new(move |_| serde_json::from_value(value.get()).unwrap_or_default())
+}
+
+fn write<T: Serialize>(data: PlatformData, key: &str, value: &T) {
+    data.set(key, serde_json::to_value(value).expect("plain data"));
 }
 
 /// The names of this model's stores in the platform data.
@@ -149,19 +164,21 @@ impl Todos {
             editing_id: key("editingId"),
             edit_text: key("editText"),
         };
-        data.define::<Vec<Todo>>(&keys.list, &Vec::new());
-        data.define::<i32>(&keys.next_id, &1);
-        data.define::<Filter>(&keys.filter, &Filter::All);
-        data.define::<String>(&keys.input_text, &String::new());
-        data.define::<Option<i32>>(&keys.editing_id, &None);
-        data.define::<String>(&keys.edit_text, &String::new());
+        // A second model with the same name finds these already there and
+        // becomes another view of the same state.
+        let _ = data.create_store(&keys.list, serde_json::json!([]));
+        let _ = data.create_store(&keys.next_id, serde_json::json!(1));
+        let _ = data.create_store(&keys.filter, serde_json::json!("all"));
+        let _ = data.create_store(&keys.input_text, serde_json::json!(""));
+        let _ = data.create_store(&keys.editing_id, serde_json::json!(null));
+        let _ = data.create_store(&keys.edit_text, serde_json::json!(""));
 
-        let list = data.lens::<Vec<Todo>>(&keys.list);
-        let next_id = data.lens::<i32>(&keys.next_id);
-        let filter = data.lens::<Filter>(&keys.filter);
-        let input_text = data.lens::<String>(&keys.input_text);
-        let editing_id = data.lens::<Option<i32>>(&keys.editing_id);
-        let edit_text = data.lens::<String>(&keys.edit_text);
+        let list = lens::<Vec<Todo>>(data, &keys.list);
+        let next_id = lens::<i32>(data, &keys.next_id);
+        let filter = lens::<Filter>(data, &keys.filter);
+        let input_text = lens::<String>(data, &keys.input_text);
+        let editing_id = lens::<Option<i32>>(data, &keys.editing_id);
+        let edit_text = lens::<String>(data, &keys.edit_text);
 
         let filters = Memo::new(move |_| {
             let current = filter.get();
@@ -209,8 +226,8 @@ impl Todos {
                 async move {
                     let todos = loading.await?;
                     let max_id = todos.iter().map(|t| t.id).max().unwrap_or(0);
-                    data.write(&next_id_key, &(max_id + 1));
-                    data.write(&list_key, &todos);
+                    write(data, &next_id_key, &(max_id + 1));
+                    write(data, &list_key, &todos);
                     loaded.set(true);
                     Ok(())
                 }
@@ -267,7 +284,7 @@ impl Todos {
     fn update_list(&self, change: impl FnOnce(&mut Vec<Todo>)) {
         let mut todos = self.list.get();
         change(&mut todos);
-        self.data.write(&self.keys.list, &todos);
+        write(self.data, &self.keys.list, &todos);
         self.dirty.set(true);
     }
 
@@ -292,7 +309,7 @@ impl Todos {
             return -1;
         }
         let id = self.next_id.get();
-        self.data.write(&self.keys.next_id, &(id + 1));
+        write(self.data, &self.keys.next_id, &(id + 1));
         self.update_list(|todos| {
             todos.push(Todo {
                 id,
@@ -304,7 +321,7 @@ impl Todos {
     }
 
     pub fn set_input_text(&self, text: &str) {
-        self.data.write(&self.keys.input_text, &text);
+        write(self.data, &self.keys.input_text, &text);
     }
 
     /// The new-todo form was submitted: add what was typed and clear the
@@ -331,13 +348,13 @@ impl Todos {
             .find(|t| t.id == id)
             .map(|t| t.text.clone());
         if let Some(text) = text {
-            self.data.write(&self.keys.editing_id, &Some(id));
+            write(self.data, &self.keys.editing_id, &Some(id));
             self.set_edit_text(&text);
         }
     }
 
     pub fn set_edit_text(&self, text: &str) {
-        self.data.write(&self.keys.edit_text, &text);
+        write(self.data, &self.keys.edit_text, &text);
     }
 
     /// A key was pressed in the edit field: Enter commits, Escape cancels.
@@ -358,7 +375,7 @@ impl Todos {
     }
 
     pub fn cancel_edit(&self) {
-        self.data.write(&self.keys.editing_id, &None::<i32>);
+        write(self.data, &self.keys.editing_id, &None::<i32>);
         self.set_edit_text("");
     }
 
@@ -403,7 +420,7 @@ impl Todos {
     }
 
     pub fn set_filter(&self, filter: Filter) {
-        self.data.write(&self.keys.filter, &filter);
+        write(self.data, &self.keys.filter, &filter);
     }
 
     /// Stops the autosave effect. In-flight async work completes naturally.
@@ -529,6 +546,26 @@ mod tests {
         assert_eq!(t.list.get()[0].text, "write the docs");
         t.commit_edit(); // a blur after Enter has nothing left to apply
         assert_eq!(t.list.get()[0].text, "write the docs");
+    }
+
+    #[test]
+    fn the_state_is_in_the_platform_data() {
+        let (storage, _) = mem_storage(false);
+        let t = Todos::with_storage("todos", storage);
+        let data = PlatformData::new();
+        let raw = data.get_store("todos/list");
+
+        t.add("seen from outside");
+        assert_eq!(raw.get()[0]["text"], "seen from outside");
+
+        // Anyone can write a store. The model reads what it can.
+        data.set(
+            "todos/list",
+            serde_json::json!([{ "id": 9, "text": "put there", "done": true }]),
+        );
+        assert_eq!((t.completed.get(), t.remaining.get()), (1, 0));
+        data.set("todos/list", serde_json::json!("not a list"));
+        assert!(t.is_empty.get());
     }
 
     #[test]

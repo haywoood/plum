@@ -23,7 +23,7 @@ npm run dev
 
 | File                            | What it shows                                                                                  |
 | ------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `model/src/platform_data.rs`    | Named JSON stores shared by everything on the page; typed stores refuse other shapes           |
+| `model/src/platform_data.rs`    | A service that keeps named values for everything on the page, without knowing what they are    |
 | `model/src/todos.rs`            | CRUD and computed lenses over platform data, with `#[derive(PlumModel)]` and `#[plum_actions]` |
 | `model/src/storage.rs`          | `localStorage` behind a seam, so the model also runs natively                                  |
 | `model/src/runtime.rs`          | Executor and owner setup for running the model without a view                                  |
