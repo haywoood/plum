@@ -946,6 +946,7 @@ dependencies = [
  "plum-macro",
  "reactive_graph",
  "serde",
+ "serde-wasm-bindgen",
  "serde_json",
  "wasm-bindgen",
 ]
@@ -1532,7 +1533,6 @@ dependencies = [
  "reactive_graph",
  "serde",
  "serde-wasm-bindgen",
- "serde_json",
  "ts-rs",
  "wasm-bindgen",
  "wasm-bindgen-futures",

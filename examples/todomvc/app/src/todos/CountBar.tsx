@@ -8,9 +8,7 @@ export default function CountBar() {
   return (
     <div className="plum-footer">
       <span className="plum-count">{remaining} left</span>
-      {completed > 0 && (
-        <button onClick={() => todos.actions.clearCompleted()}>Clear completed</button>
-      )}
+      {completed > 0 && <button onClick={todos.actions.clearCompleted}>Clear completed</button>}
     </div>
   );
 }

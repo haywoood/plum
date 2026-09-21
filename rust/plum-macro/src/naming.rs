@@ -1,72 +1,77 @@
-/// Convert snake_case to camelCase: "set_filter" → "setFilter", "last_error" → "lastError".
+/// "set_filter" -> "setFilter". Input that is already camelCase is kept.
 pub fn snake_to_camel(s: &str) -> String {
-    let mut result = String::new();
-    let mut capitalize_next = false;
+    let mut out = String::new();
+    let mut upper = false;
     for c in s.chars() {
         if c == '_' {
-            capitalize_next = true;
-        } else if capitalize_next {
-            result.push(c.to_ascii_uppercase());
-            capitalize_next = false;
+            upper = true;
+        } else if upper {
+            out.push(c.to_ascii_uppercase());
+            upper = false;
         } else {
-            result.push(c);
+            out.push(c);
         }
     }
-    result
+    out
 }
 
-/// Given a model struct name, return the generated wasm class name.
-/// "Todos" → "WasmTodos"
-pub fn wasm_class_name(model_name: &str) -> String {
-    format!("Wasm{}", model_name)
-}
-
-/// Convert PascalCase to kebab-case: "MyModel" → "my-model", "Todos" → "todos".
-pub fn kebab_case(s: &str) -> String {
-    let mut result = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if c.is_uppercase() && i > 0 {
-            result.push('-');
-        }
-        result.push(c.to_ascii_lowercase());
-    }
-    result
-}
-
-/// Convert PascalCase to snake_case: "MyModel" → "my_model", "Todos" → "todos".
-pub fn pascal_to_snake(s: &str) -> String {
-    let mut result = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if c.is_uppercase() && i > 0 {
-            result.push('_');
-        }
-        result.push(c.to_ascii_lowercase());
-    }
-    result
-}
-
-/// Convert snake_case to PascalCase: "last_error" → "LastError", "list" → "List".
+/// "last_error" -> "LastError", "Todos" -> "Todos".
 pub fn pascal_case(s: &str) -> String {
-    let mut result = String::new();
-    let mut capitalize_next = true;
-    for c in s.chars() {
-        if c == '_' {
-            capitalize_next = true;
-        } else if capitalize_next {
-            result.push(c.to_ascii_uppercase());
-            capitalize_next = false;
-        } else {
-            result.push(c);
-        }
+    let camel = snake_to_camel(s);
+    let mut chars = camel.chars();
+    match chars.next() {
+        Some(c) => c.to_ascii_uppercase().to_string() + chars.as_str(),
+        None => camel,
     }
-    result
 }
 
-/// Lowercase the first character: "Todos" → "todos", "lastError" → "lastError".
+/// "Todos" -> "todos", "lastError" -> "lastError".
 pub fn lower_first(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
         Some(c) => c.to_ascii_lowercase().to_string() + chars.as_str(),
         None => String::new(),
+    }
+}
+
+/// "MyModel" -> "my_model".
+pub fn snake_case(s: &str) -> String {
+    separated(s, '_')
+}
+
+/// "MyModel" -> "my-model".
+pub fn kebab_case(s: &str) -> String {
+    separated(s, '-')
+}
+
+fn separated(pascal: &str, separator: char) -> String {
+    let mut out = String::new();
+    for (i, c) in pascal.chars().enumerate() {
+        if c.is_uppercase() && i > 0 {
+            out.push(separator);
+        }
+        out.push(c.to_ascii_lowercase());
+    }
+    out
+}
+
+/// The generated wasm-bindgen class for a model: "Todos" -> "WasmTodos".
+pub fn wasm_class_name(model: &str) -> String {
+    format!("Wasm{model}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names() {
+        assert_eq!(snake_to_camel("set_filter"), "setFilter");
+        assert_eq!(pascal_case("last_error"), "LastError");
+        assert_eq!(pascal_case("Todos"), "Todos");
+        assert_eq!(lower_first("Todos"), "todos");
+        assert_eq!(snake_case("MyModel"), "my_model");
+        assert_eq!(kebab_case("MyModel"), "my-model");
+        assert_eq!(wasm_class_name("Todos"), "WasmTodos");
     }
 }

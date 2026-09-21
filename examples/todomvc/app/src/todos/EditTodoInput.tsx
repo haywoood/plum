@@ -12,7 +12,7 @@ export default function EditTodoInput() {
       autoFocus
       onChange={(e) => todos.actions.setEditText(e.target.value)}
       onKeyDown={(e) => todos.actions.editKey(e.key)}
-      onBlur={() => todos.actions.commitEdit()}
+      onBlur={todos.actions.commitEdit}
     />
   );
 }

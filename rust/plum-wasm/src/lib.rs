@@ -1,46 +1,28 @@
-//! `plum-wasm` — the Rust half of the plum adapter.
+//! The runtime of plum, a Leptos-to-TypeScript adapter.
 //!
-//! Plum's job: let a **view-agnostic Leptos** logic crate (plain signals,
-//! memos, actions — no DOM, no view features) be consumed by TypeScript
-//! frontends, with **Nanostores** as the public reactive surface.
+//! `plum-macro` generates a wasm-bindgen class for a model; this crate is
+//! what that generated code calls.
 //!
-//! This crate provides the generic machinery that per-app adapter crates use:
-//!
-//! - [`bridge::Bridge`] — an effect-driven subscription registry: each JS
-//!   `watch` becomes one Leptos `Effect` that pushes values to a JS callback;
-//!   `unwatch` stops it, and `flush` delivers pending changes right away.
-//! - [`bridge::Payload`] — the value types that cross to JS (app crates
-//!   build payloads explicitly in their watch closures).
-//! - [`js`] (wasm only) — minimal helpers for dynamic host I/O
-//!   (localStorage, fetch, timers) without web-sys.
-//!
-//! The model crate (e.g. `examples/todomvc/model`) generates its own
-//! `#[wasm_bindgen]` classes and call [`bridge::Bridge::watch`] for each
-//! reactive value they expose.
+//! - [`Bridge`] holds the subscriptions of one model: every JS `watch` is a
+//!   Leptos `Effect` that hands values to a JS callback, `unwatch` stops it,
+//!   and `flush` delivers pending changes before an action returns.
+//! - [`Payload`] is the value that crosses, converted from anything
+//!   `Serialize`.
+//! - [`runtime::init`] sets up the executor and the root owner that signals
+//!   and async actions need outside of a Leptos app.
+//! - [`js`] (wasm only) has a few helpers for calling host JS functions
+//!   without web-sys.
 
 pub mod bridge;
 pub mod runtime;
+
+#[doc(hidden)]
+#[path = "rt.rs"]
+pub mod __rt;
 
 /// Dynamic host-JS helpers (wasm target only).
 #[cfg(target_arch = "wasm32")]
 pub mod js;
 
 pub use bridge::{Bridge, Payload};
-
-/// Declarative bridge generation. See the `plum-macro` crate for details.
-///
-/// ```rust,ignore
-/// #[derive(PlumModel)]
-/// pub struct Todos {
-///     #[plum(watch)]
-///     list: RwSignal<Vec<Todo>>,
-///     // ...
-/// }
-///
-/// #[plum_actions]
-/// impl Todos {
-///     pub fn add(&self, text: &str) -> i32 { ... }
-///     // ...
-/// }
-/// ```
 pub use plum_macro::{plum_actions, PlumModel};

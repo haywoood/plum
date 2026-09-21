@@ -2,7 +2,7 @@
 name = "plum-macro"
 version = "0.1.0"
 edition = "2021"
-description = "proc-macro for plum: generates #[wasm_bindgen] bridge classes and TypeScript binding modules from a declarative spec."
+description = "Macros for plum: generate the wasm-bindgen class and the TypeScript binding for a Leptos model."
 
 [lib]
 proc-macro = true

@@ -23,10 +23,8 @@ mod wasm_impl {
 
     use plum_wasm::js::{self, JsFn};
 
-    const STORAGE_KEY: &str = "plum-todomvc";
-
     /// Simulated round-trip latency for saves so the UI's `saving` state is
-    /// visible (mirrors the old Counter demo's simulated backend latency).
+    /// visible.
     const SAVE_SETTLE_MS: u32 = 120;
 
     async fn delay_ms(ms: u32) -> Result<(), String> {
@@ -41,16 +39,18 @@ mod wasm_impl {
         Ok(())
     }
 
-    pub fn local_storage() -> Storage {
+    pub fn local_storage(key: &str) -> Storage {
+        let (load_key, save_key) = (key.to_string(), key.to_string());
         Storage {
             load: Arc::new(move || {
+                let key = load_key.clone();
                 Box::pin(async move {
                     let global = js::global();
                     let ls = Reflect::get(&global, &JsValue::from_str("localStorage"))
                         .map_err(|e| js::js_err(&e))?;
                     let get: JsFn = plum_wasm::js::get_fn(&ls, "getItem")?;
                     let raw = get
-                        .call1(&ls, &JsValue::from_str(STORAGE_KEY))
+                        .call1(&ls, &JsValue::from_str(&key))
                         .map_err(|e| js::js_err(&e))?;
                     let raw = raw.as_string();
                     match raw {
@@ -64,6 +64,7 @@ mod wasm_impl {
                 }) as Pin<Box<dyn Future<Output = Result<Vec<Todo>, String>>>>
             }),
             save: Arc::new(move |todos: Vec<Todo>| {
+                let key = save_key.clone();
                 Box::pin(async move {
                     let value = serde_wasm_bindgen::to_value(&todos).map_err(|e| e.to_string())?;
                     let json = js_sys::JSON::stringify(&value).map_err(|e| js::js_err(&e))?;
@@ -72,7 +73,7 @@ mod wasm_impl {
                     let ls = Reflect::get(&global, &JsValue::from_str("localStorage"))
                         .map_err(|e| js::js_err(&e))?;
                     let set: JsFn = plum_wasm::js::get_fn(&ls, "setItem")?;
-                    set.call2(&ls, &JsValue::from_str(STORAGE_KEY), &JsValue::from(json))
+                    set.call2(&ls, &JsValue::from_str(&key), &JsValue::from(json))
                         .map_err(|e| js::js_err(&e))?;
                     Ok(())
                 }) as Pin<Box<dyn Future<Output = Result<(), String>>>>
@@ -85,7 +86,7 @@ mod wasm_impl {
 mod native_impl {
     use super::*;
 
-    pub fn local_storage() -> Storage {
+    pub fn local_storage(_key: &str) -> Storage {
         Storage {
             load: Arc::new(move || {
                 Box::pin(async move { Err("storage is unavailable in native builds".to_string()) })
@@ -100,13 +101,13 @@ mod native_impl {
 }
 
 /// The storage backend for the current target.
-pub fn local_storage() -> Storage {
+pub fn local_storage(key: &str) -> Storage {
     #[cfg(all(target_arch = "wasm32", feature = "plum"))]
     {
-        wasm_impl::local_storage()
+        wasm_impl::local_storage(key)
     }
     #[cfg(not(all(target_arch = "wasm32", feature = "plum")))]
     {
-        native_impl::local_storage()
+        native_impl::local_storage(key)
     }
 }

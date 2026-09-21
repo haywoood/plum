@@ -8,7 +8,7 @@ export default function Toolbar() {
 
   return (
     <div className="plum-toolbar">
-      <button disabled={total === 0} onClick={() => todos.actions.toggleAll()}>
+      <button disabled={total === 0} onClick={todos.actions.toggleAll}>
         {allDone ? "Mark all active" : "Mark all done"}
       </button>
       <span className="plum-status">{saving ? "Saving…" : ""}</span>

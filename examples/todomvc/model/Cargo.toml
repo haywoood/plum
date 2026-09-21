@@ -15,18 +15,16 @@ reactive_graph = { workspace = true }
 any_spawner = { workspace = true }
 serde = { workspace = true }
 
-# plum-macro is always present (tiny: syn/quote/proc-macro2) so the derive
-# and attribute can be applied unconditionally; the code they generate is
-# gated by #[cfg(feature = "plum")] inside the expansion.
+# Always present, so the derive and the attribute resolve in every build.
+# What they generate for wasm is behind #[cfg(feature = "plum")].
 plum-macro = { workspace = true }
 ts-rs = { workspace = true }
 
-# Plum feature: opt-in wasm glue. When disabled, this crate is pure Leptos
-# with zero wasm/plum dependencies.
+# The wasm build. plum needs plum-wasm and wasm-bindgen; js-sys and
+# serde-wasm-bindgen are for this crate's own localStorage code.
 wasm-bindgen = { workspace = true, optional = true }
 js-sys = { workspace = true, optional = true }
 plum-wasm = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
 serde-wasm-bindgen = { workspace = true, optional = true }
 
 [features]
@@ -35,7 +33,6 @@ plum = [
   "dep:wasm-bindgen",
   "dep:js-sys",
   "dep:plum-wasm",
-  "dep:serde_json",
   "dep:serde-wasm-bindgen",
 ]
 

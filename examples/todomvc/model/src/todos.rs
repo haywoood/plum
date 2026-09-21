@@ -55,7 +55,7 @@ pub struct Storage {
 
 /// The TodoMVC model. All state is Leptos reactive; all operations are plain
 /// methods with direct `&self` access.
-#[derive(PlumModel, Clone)]
+#[derive(PlumModel)]
 pub struct Todos {
     #[plum(watch, js = "Todos")]
     list: RwSignal<Vec<Todo>>,
@@ -95,9 +95,10 @@ pub struct Todos {
 
 #[plum_actions]
 impl Todos {
-    /// Creates the model with the default (target-appropriate) storage backend.
-    pub fn new() -> Self {
-        Self::with_storage(crate::storage::local_storage())
+    /// Creates the model on the default storage backend for the target,
+    /// keeping the list under `storage_key`.
+    pub fn new(storage_key: &str) -> Self {
+        Self::with_storage(crate::storage::local_storage(storage_key))
     }
 
     /// Creates the model with an explicit storage backend (used by tests).
@@ -175,49 +176,6 @@ impl Todos {
             autosave,
             storage,
         }
-    }
-
-    pub fn list(&self) -> RwSignal<Vec<Todo>> {
-        self.list
-    }
-    pub fn filter(&self) -> RwSignal<Filter> {
-        self.filter
-    }
-    pub fn filters(&self) -> Memo<Vec<Filter>> {
-        self.filters
-    }
-    pub fn total(&self) -> Memo<i32> {
-        self.total
-    }
-    pub fn all_done(&self) -> Memo<bool> {
-        self.all_done
-    }
-    pub fn remaining(&self) -> Memo<i32> {
-        self.remaining
-    }
-    pub fn completed(&self) -> Memo<i32> {
-        self.completed
-    }
-    /// The list after the active filter is applied (Leptos memo).
-    pub fn visible(&self) -> Memo<Vec<Todo>> {
-        self.visible
-    }
-    /// True while a save is in flight.
-    pub fn saving(&self) -> RwSignal<bool> {
-        self.saving
-    }
-    /// Message from the last failed load/save, if any.
-    pub fn last_error(&self) -> RwSignal<Option<String>> {
-        self.last_error
-    }
-    pub fn input_text(&self) -> RwSignal<String> {
-        self.input_text
-    }
-    pub fn editing_id(&self) -> RwSignal<Option<i32>> {
-        self.editing_id
-    }
-    pub fn edit_text(&self) -> RwSignal<String> {
-        self.edit_text
     }
 
     /// Loads the list from the storage backend.
@@ -395,12 +353,6 @@ impl Todos {
     }
 }
 
-impl Default for Todos {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,32 +408,32 @@ mod tests {
         let (storage, _) = mem_storage(false);
         let t = Todos::with_storage(storage);
         futures::executor::block_on(t.load()).unwrap();
-        assert!(t.list().get().is_empty());
+        assert!(t.list.get().is_empty());
 
         let a = t.add("write the adapter");
         let b = t.add("ship it");
         assert_eq!((a, b), (1, 2));
-        assert_eq!(t.remaining().get(), 2);
-        assert_eq!(t.completed().get(), 0);
+        assert_eq!(t.remaining.get(), 2);
+        assert_eq!(t.completed.get(), 0);
 
         t.toggle(a);
-        assert_eq!(t.remaining().get(), 1);
-        assert_eq!(t.completed().get(), 1);
-        assert_eq!(t.visible().get().len(), 2); // All
+        assert_eq!(t.remaining.get(), 1);
+        assert_eq!(t.completed.get(), 1);
+        assert_eq!(t.visible.get().len(), 2); // All
 
         t.set_filter(Filter::Active);
-        assert_eq!(t.visible().get().len(), 1);
+        assert_eq!(t.visible.get().len(), 1);
         t.set_filter(Filter::Completed);
-        assert_eq!(t.visible().get().len(), 1);
+        assert_eq!(t.visible.get().len(), 1);
         t.set_filter(Filter::All);
 
         t.edit(b, "ship it v2");
-        assert_eq!(t.list().get()[1].text, "ship it v2");
+        assert_eq!(t.list.get()[1].text, "ship it v2");
         t.edit(b, "   "); // empty edit removes the todo
-        assert_eq!(t.list().get().len(), 1);
+        assert_eq!(t.list.get().len(), 1);
 
         t.remove(a);
-        assert!(t.list().get().is_empty());
+        assert!(t.list.get().is_empty());
     }
 
     #[test]
@@ -491,27 +443,27 @@ mod tests {
 
         t.set_input_text("   ");
         t.submit_new();
-        assert!(t.list().get().is_empty());
-        assert_eq!(t.input_text().get(), "   ", "blank text stays in the field");
+        assert!(t.list.get().is_empty());
+        assert_eq!(t.input_text.get(), "   ", "blank text stays in the field");
 
         t.set_input_text("write docs");
         t.submit_new();
-        assert_eq!(t.list().get()[0].text, "write docs");
-        assert_eq!(t.input_text().get(), "");
+        assert_eq!(t.list.get()[0].text, "write docs");
+        assert_eq!(t.input_text.get(), "");
 
         t.start_edit(1);
-        assert_eq!(t.edit_text().get(), "write docs");
+        assert_eq!(t.edit_text.get(), "write docs");
         t.set_edit_text("changed my mind");
         t.edit_key("Escape");
-        assert_eq!(t.list().get()[0].text, "write docs");
-        assert_eq!(t.editing_id().get(), None);
+        assert_eq!(t.list.get()[0].text, "write docs");
+        assert_eq!(t.editing_id.get(), None);
 
         t.start_edit(1);
         t.set_edit_text("write the docs");
         t.edit_key("Enter");
-        assert_eq!(t.list().get()[0].text, "write the docs");
+        assert_eq!(t.list.get()[0].text, "write the docs");
         t.commit_edit(); // a blur after Enter has nothing left to apply
-        assert_eq!(t.list().get()[0].text, "write the docs");
+        assert_eq!(t.list.get()[0].text, "write the docs");
     }
 
     #[test]
@@ -522,13 +474,13 @@ mod tests {
         let b = t.add("two");
 
         t.toggle_all(); // nothing done yet -> all done
-        assert_eq!(t.remaining().get(), 0);
+        assert_eq!(t.remaining.get(), 0);
         t.toggle_all(); // all done -> all unchecked
-        assert_eq!(t.remaining().get(), 2);
+        assert_eq!(t.remaining.get(), 2);
         t.toggle(a);
         t.toggle(b);
         t.toggle_all(); // all done again -> all unchecked
-        assert!(t.list().get().iter().all(|t| !t.done));
+        assert!(t.list.get().iter().all(|t| !t.done));
     }
 
     #[test]
@@ -540,7 +492,7 @@ mod tests {
         t.toggle(b);
         t.clear_completed();
         assert_eq!(
-            t.list().get(),
+            t.list.get(),
             vec![Todo {
                 id: a,
                 text: "keep".into(),
@@ -554,7 +506,7 @@ mod tests {
         let (storage, mem) = mem_storage(false);
         let t = Todos::with_storage(storage);
         futures::executor::block_on(t.load()).unwrap();
-        assert!(t.list().get().is_empty());
+        assert!(t.list.get().is_empty());
 
         t.add("persist me");
         crate::runtime::pump(); // effect re-runs, spawns save, save completes
@@ -566,7 +518,7 @@ mod tests {
                 done: false
             }]
         );
-        assert!(t.last_error().get().is_none());
+        assert!(t.last_error.get().is_none());
     }
 
     #[test]
@@ -575,8 +527,8 @@ mod tests {
         *mem.lock().unwrap() = sample();
         let t = Todos::with_storage(storage);
         futures::executor::block_on(t.load()).unwrap();
-        assert_eq!(t.list().get(), sample());
-        assert_eq!(t.remaining().get(), 2);
+        assert_eq!(t.list.get(), sample());
+        assert_eq!(t.remaining.get(), 2);
         assert_eq!(t.add("d"), 4, "new ids continue after the loaded ones");
     }
 
@@ -587,9 +539,9 @@ mod tests {
         futures::executor::block_on(t.load()).unwrap();
         t.add("boom");
         crate::runtime::pump();
-        assert_eq!(t.last_error().get().as_deref(), Some("disk full"));
+        assert_eq!(t.last_error.get().as_deref(), Some("disk full"));
         // The list is unaffected by the failed save.
-        assert_eq!(t.list().get().len(), 1);
+        assert_eq!(t.list.get().len(), 1);
     }
 
     #[test]
@@ -601,7 +553,7 @@ mod tests {
         t.add("after dispose");
         crate::runtime::pump();
         assert!(mem.lock().unwrap().is_empty(), "autosave must be stopped");
-        assert_eq!(t.list().get().len(), 1); // state still works in memory
+        assert_eq!(t.list.get().len(), 1); // state still works in memory
     }
 
     #[test]

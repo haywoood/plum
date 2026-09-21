@@ -1,207 +1,132 @@
-//! The `PlumModel` derive macro: generates a `#[wasm_bindgen]` wrapper struct
-//! with watch methods, unwatch, dispose, and a `new_with` constructor.
-//! Also writes a `.ts` binding file to `$CARGO_MANIFEST_DIR/plum_gen/`.
+//! `#[derive(PlumModel)]`: the wasm-bindgen wrapper around a model struct, and
+//! the test that writes the model's TypeScript binding.
+//!
+//! The macro only deals in names. Everything about types is left to the
+//! compiler: a watched field has to implement `Get`, its value has to be
+//! `Serialize` and `TS`, and ts-rs names it, whatever it is.
 
-use proc_macro2::TokenStream;
-use quote::quote;
-use syn::{Data, DeriveInput, Fields};
+use proc_macro2::{Span, TokenStream};
+use quote::{format_ident, quote, quote_spanned};
+use syn::spanned::Spanned;
+use syn::{Data, DeriveInput, Fields, Ident, Type};
 
 use crate::naming::{
-    kebab_case, lower_first, pascal_case, pascal_to_snake, snake_to_camel, wasm_class_name,
+    kebab_case, lower_first, pascal_case, snake_case, snake_to_camel, wasm_class_name,
 };
-use crate::ts_type::{infer_ts_type, validate_watch_type};
 
-/// A watched field's metadata collected from the struct.
-struct WatchInfo {
-    /// Field name (used to call the core accessor).
-    field_name: String,
-    /// JS method name for the watch (e.g. "watchTodos").
+struct Watch<'a> {
+    field: &'a Ident,
+    ty: &'a Type,
+    /// The watch method on the wasm class, e.g. `watchTodos`.
     js_name: String,
-    /// Store key in the generated TS (lowerCamelCase JS-facing name).
+    /// The key in the generated stores object, e.g. `todos`.
     store_key: String,
-    /// Inferred TypeScript type (e.g. "Todo[]").
-    ts_type: String,
 }
 
-pub fn expand(input: &DeriveInput) -> TokenStream {
-    let struct_name = &input.ident;
-    let struct_name_str = struct_name.to_string();
-    let wasm_name_str = wasm_class_name(&struct_name_str);
-    let wasm_name_ident = syn::Ident::new(&wasm_name_str, proc_macro2::Span::call_site());
+pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
+    let model = &input.ident;
+    let model_name = model.to_string();
+    let wasm = Ident::new(&wasm_class_name(&model_name), Span::call_site());
 
-    // Parse struct-level plum config (reserved for future use)
-    let _ = &input.attrs;
-
-    let data_struct = match &input.data {
-        Data::Struct(s) => s,
+    if !input.generics.params.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &input.generics,
+            "plum: a model cannot have generic parameters, because wasm-bindgen cannot export one",
+        ));
+    }
+    let fields = match &input.data {
+        Data::Struct(s) => match &s.fields {
+            Fields::Named(f) => &f.named,
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    model,
+                    "plum: PlumModel needs a struct with named fields",
+                ))
+            }
+        },
         _ => {
-            return syn::Error::new_spanned(struct_name, "PlumModel can only be derived on structs")
-                .to_compile_error()
+            return Err(syn::Error::new_spanned(
+                model,
+                "plum: PlumModel can only be derived on a struct",
+            ))
         }
     };
 
-    let fields = match &data_struct.fields {
-        Fields::Named(f) => &f.named,
-        _ => {
-            return syn::Error::new_spanned(
-                struct_name,
-                "PlumModel requires a struct with named fields",
-            )
-            .to_compile_error()
-        }
-    };
-
-    // Collect watched fields
-    let mut watches: Vec<WatchInfo> = Vec::new();
-    let mut type_errors: Vec<String> = Vec::new();
-    for field in fields.iter() {
-        let field_name = field.ident.as_ref().unwrap().to_string();
-        let plum_attr = field.attrs.iter().find(|a| a.path().is_ident("plum"));
-        if let Some(attr) = plum_attr {
-            if let Some(js_override) = parse_watch_attr(attr) {
-                if let Some(err) = validate_watch_type(&field.ty) {
-                    type_errors.push(format!("field `{}`: {}", field_name, err));
-                }
-                let ts_type = infer_ts_type(&field.ty);
-                let js_name = match js_override {
-                    Some(ref suffix) => format!("watch{}", pascal_case(suffix)),
-                    None => format!("watch{}", pascal_case(&field_name)),
-                };
-                let store_key = match js_override {
-                    Some(ref suffix) => lower_first(suffix),
-                    None => snake_to_camel(&field_name),
-                };
-                watches.push(WatchInfo {
-                    field_name,
-                    js_name,
-                    store_key,
-                    ts_type,
+    let mut watches = Vec::new();
+    for field in fields {
+        let name = field.ident.as_ref().expect("named field");
+        for attr in field.attrs.iter().filter(|a| a.path().is_ident("plum")) {
+            if let Some(js) = parse_watch(attr)? {
+                let base = js.unwrap_or_else(|| name.to_string());
+                watches.push(Watch {
+                    field: name,
+                    ty: &field.ty,
+                    js_name: format!("watch{}", pascal_case(&base)),
+                    store_key: lower_first(&snake_to_camel(&base)),
                 });
             }
         }
     }
-    if !type_errors.is_empty() {
-        return syn::Error::new_spanned(
-            struct_name,
-            format!(
-                "plum: unsupported watch field types: {}",
-                type_errors.join("; ")
-            ),
-        )
-        .to_compile_error();
-    }
 
-    // Generate Rust watch methods
-    let watch_methods: Vec<TokenStream> = watches
-        .iter()
-        .map(|w| {
-            let method_ident = syn::Ident::new(
-                &format!("watch_{}", w.field_name),
-                proc_macro2::Span::call_site(),
-            );
-            let core_method =
-                syn::Ident::new(w.field_name.as_str(), proc_macro2::Span::call_site());
-            let js_name = &w.js_name;
-
-            quote! {
-                #[::wasm_bindgen::prelude::wasm_bindgen(js_name = #js_name)]
-                pub fn #method_ident(&self, f: ::js_sys::Function) -> u32 {
-                    let h = self.core.#core_method();
-                    self.bridge.watch_json(move || h.get(), f)
-                }
-            }
-        })
-        .collect();
-
-    // Generate and write the TS binding file
-    let ts_content = generate_ts(&struct_name_str, &watches);
-    let file_name = kebab_case(&struct_name_str);
-    let write_result = write_ts_file(&file_name, &ts_content);
-    // Emit a compile_error if the file write fails, so it's visible
-    let write_err = match write_result {
-        Ok(_) => TokenStream::new(),
-        Err(e) => syn::Error::new_spanned(
-            struct_name,
-            format!("plum: failed to write TS binding file: {}", e),
-        )
-        .to_compile_error(),
-    };
-
-    // Factory function: create_{snake}( ) -> Wasm{Name}, js_name = create{Pascal}
-    let factory_fn_name = syn::Ident::new(
-        &format!("create_{}", pascal_to_snake(&struct_name_str)),
-        proc_macro2::Span::call_site(),
-    );
-    let factory_js_name = format!("create{}", struct_name_str);
-
-    // Generate a test that writes types.ts via ts-rs export_to_string
-    let types_test = {
-        let used_types: Vec<&str> = {
-            let mut seen: Vec<&str> = Vec::new();
-            for w in &watches {
-                let base = extract_base_type(&w.ts_type);
-                if !is_ts_primitive(base) && !seen.contains(&base) {
-                    seen.push(base);
-                }
-            }
-            seen
+    let watch_methods = watches.iter().map(|w| {
+        let method = format_ident!("watch_{}", w.field);
+        let (field, js_name) = (w.field, &w.js_name);
+        // Spanned to the field's type, so that a missing `Get` or `Serialize`
+        // is reported on the field and not on the derive.
+        let body = quote_spanned! {w.ty.span()=>
+            let source = ::core::clone::Clone::clone(&self.core.#field);
+            self.bridge
+                .watch_json(move || ::leptos::reactive::traits::Get::get(&source), f)
         };
-        if used_types.is_empty() {
-            TokenStream::new()
-        } else {
-            let type_exports: Vec<TokenStream> = used_types
-                .iter()
-                .map(|ty| {
-                    let ty_ident = syn::Ident::new(ty, proc_macro2::Span::call_site());
-                    quote! {
-                        out.push_str(&<#ty_ident as ::ts_rs::TS>::export_to_string(&cfg).unwrap());
-                        out.push_str("\n\n");
-                    }
-                })
-                .collect();
-            quote! {
-                #[cfg(test)]
-                #[test]
-                fn _plum_gen_types() {
-                    let cfg = ::ts_rs::Config::default();
-                    let mut out = String::from(
-                        "// AUTO-GENERATED by ts-rs via PlumModel — do not edit.\n",
-                    );
-                    #(#type_exports)*
-                    let dir = format!("{}/plum_gen", env!("CARGO_MANIFEST_DIR"));
-                    let path = format!("{}/types.ts", dir);
-                    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-                    if existing != out {
-                        std::fs::create_dir_all(&dir).unwrap();
-                        std::fs::write(&path, &out).unwrap();
-                    }
-                }
+        quote! {
+            #[::wasm_bindgen::prelude::wasm_bindgen(js_name = #js_name)]
+            pub fn #method(&self, f: ::plum_wasm::__rt::js_sys::Function) -> u32 {
+                #body
             }
         }
-    };
+    });
 
-    quote! {
-        #[cfg(feature = "plum")]
-        #[::wasm_bindgen::prelude::wasm_bindgen]
-        pub struct #wasm_name_ident {
-            core: #struct_name,
-            bridge: ::plum_wasm::bridge::Bridge,
+    let export = export_test(model, &model_name, &watches);
+    let watched = watches.iter().map(|w| w.field);
+
+    Ok(quote! {
+        impl #model {
+            // The watched fields are read by the code below, which is compiled
+            // out without the `plum` feature. This read keeps the compiler
+            // from calling them dead in that build.
+            #[doc(hidden)]
+            pub fn __plum_watched(&self) {
+                let _ = (#(&self.#watched,)*);
+            }
         }
 
         #[cfg(feature = "plum")]
-        impl #wasm_name_ident {
-            /// Creates the wasm wrapper around an already-constructed core model.
-            pub fn new_with(core: #struct_name) -> Self {
+        #[::wasm_bindgen::prelude::wasm_bindgen]
+        pub struct #wasm {
+            core: ::std::rc::Rc<#model>,
+            bridge: ::plum_wasm::Bridge,
+        }
+
+        #[cfg(feature = "plum")]
+        impl #wasm {
+            /// Wraps a model that was constructed by hand. Call
+            /// `plum_wasm::runtime::init()` before constructing it.
+            pub fn new_with(core: #model) -> Self {
                 Self {
-                    core,
-                    bridge: ::plum_wasm::bridge::Bridge::new(),
+                    core: ::std::rc::Rc::new(core),
+                    bridge: ::plum_wasm::Bridge::new(),
                 }
+            }
+
+            #[doc(hidden)]
+            pub fn __plum(&self) -> (&::std::rc::Rc<#model>, &::plum_wasm::Bridge) {
+                (&self.core, &self.bridge)
             }
         }
 
         #[cfg(feature = "plum")]
         #[::wasm_bindgen::prelude::wasm_bindgen]
-        impl #wasm_name_ident {
+        impl #wasm {
             #(#watch_methods)*
 
             pub fn unwatch(&self, id: u32) {
@@ -209,173 +134,151 @@ pub fn expand(input: &DeriveInput) -> TokenStream {
             }
 
             pub fn dispose(&self) {
+                // An inherent `dispose(&self)` on the model takes precedence
+                // over this trait; a model without one gets the empty default.
+                #[allow(dead_code)]
+                trait NoDispose {
+                    fn dispose(&self) {}
+                }
+                impl NoDispose for #model {}
                 self.core.dispose();
                 self.bridge.unwatch_all();
             }
         }
 
-        #write_err
-
-        #types_test
-
-        #[cfg(feature = "plum")]
-        #[::wasm_bindgen::prelude::wasm_bindgen(js_name = #factory_js_name)]
-        pub fn #factory_fn_name() -> #wasm_name_ident {
-            ::plum_wasm::runtime::init();
-            #wasm_name_ident::new_with(#struct_name::new())
-        }
-    }
+        #export
+    })
 }
 
-/// Parse a field-level `#[plum(watch)]` or `#[plum(watch, js = "...")]` attribute.
-/// Returns `Some(Option<String>)` — the outer Some means "is a watch",
-/// the inner Option is the optional JS name override.
-fn parse_watch_attr(attr: &syn::Attribute) -> Option<Option<String>> {
-    let list = match &attr.meta {
-        syn::Meta::List(l) => l,
-        _ => return None,
-    };
-
-    let mut is_watch = false;
-    let mut js_override: Option<String> = None;
-
-    let err = list.parse_nested_meta(|nested| {
-        if nested.path.is_ident("watch") {
-            is_watch = true;
-        } else if nested.path.is_ident("js") {
-            let value = nested.value()?;
-            let s: syn::LitStr = value.parse()?;
-            js_override = Some(s.value());
+/// `#[plum(watch)]` or `#[plum(watch, js = "Name")]`. Returns `None` for a
+/// `#[plum(...)]` attribute that is not a watch.
+fn parse_watch(attr: &syn::Attribute) -> syn::Result<Option<Option<String>>> {
+    let mut watch = false;
+    let mut js = None;
+    attr.parse_nested_meta(|meta| {
+        if meta.path.is_ident("watch") {
+            watch = true;
+            Ok(())
+        } else if meta.path.is_ident("js") {
+            js = Some(meta.value()?.parse::<syn::LitStr>()?.value());
+            Ok(())
+        } else {
+            Err(meta.error("plum: expected `watch` or `js = \"...\"`"))
         }
-        Ok(())
+    })?;
+    Ok(watch.then_some(js))
+}
+
+/// The test that writes `plum_gen/<model>.ts`. It runs with real type
+/// information, which the macro itself never has, so ts-rs can name every
+/// watched value and find every struct and enum nested inside one.
+fn export_test(model: &Ident, model_name: &str, watches: &[Watch]) -> TokenStream {
+    let test = format_ident!("__plum_export_{}", snake_case(model_name));
+    let file = format!("{}.ts", kebab_case(model_name));
+    let pascal = pascal_case(model_name);
+    let keys = watches.iter().map(|w| &w.store_key);
+    let js_names = watches.iter().map(|w| &w.js_name);
+    let values = watches.iter().map(|w| {
+        let ty = w.ty;
+        quote_spanned! {ty.span()=> <#ty as ::leptos::reactive::traits::Get>::Value }
     });
 
-    if err.is_err() {
-        return None;
-    }
-    if is_watch {
-        Some(js_override)
-    } else {
-        None
-    }
-}
+    quote! {
+        #[cfg(test)]
+        #[test]
+        fn #test() {
+            use ::std::fmt::Write as _;
+            use ::ts_rs::{Config, TypeVisitor, TS};
 
-/// Generate the TypeScript binding file content.
-fn generate_ts(struct_name: &str, watches: &[WatchInfo]) -> String {
-    let pascal = pascal_case(struct_name);
-    let mut out = String::new();
-
-    out.push_str("// AUTO-GENERATED by #[derive(PlumModel)] — do not edit.\n");
-    out.push_str("import { atom, type ReadableAtom } from \"nanostores\";\n");
-
-    // Import types from same-directory types.ts (generated by ts-rs)
-    {
-        let used_types: Vec<&str> = {
-            let mut seen: Vec<&str> = Vec::new();
-            for w in watches {
-                let base = extract_base_type(&w.ts_type);
-                if !is_ts_primitive(base) && !seen.contains(&base) {
-                    seen.push(base);
+            /// Collects the declaration of every named type it is shown,
+            /// and of every named type inside those.
+            struct Named<'a>(&'a Config, &'a mut ::std::collections::BTreeMap<String, String>);
+            impl TypeVisitor for Named<'_> {
+                fn visit<T: TS + 'static + ?Sized>(&mut self) {
+                    if T::output_path().is_some() {
+                        let name = T::ident(self.0);
+                        if !self.1.contains_key(&name) {
+                            self.1.insert(name, T::decl(self.0));
+                            T::visit_dependencies(self);
+                        }
+                    }
+                    T::visit_generics(self);
                 }
             }
-            seen
-        };
-        if !used_types.is_empty() {
-            let types_list = used_types.join(", ");
-            out.push_str(&format!(
-                "import type {{ {} }} from \"./types\";\n",
-                types_list
+
+            // `#[plum_actions]` defines an inherent `__plum_actions`, which
+            // takes precedence over this; a model without actions gets none.
+            #[allow(dead_code)]
+            trait NoActions {
+                fn __plum_actions<V: TypeVisitor>(_: &Config, _: &mut V) -> (String, String) {
+                    Default::default()
+                }
+            }
+            impl NoActions for #model {}
+
+            // 64-bit integers cross as JS numbers, not bigints.
+            let cfg = Config::new().with_large_int("number");
+            let mut named = ::std::collections::BTreeMap::new();
+            let mut visitor = Named(&cfg, &mut named);
+
+            let stores: Vec<(&str, &str, String)> = vec![#((
+                #keys,
+                #js_names,
+                {
+                    visitor.visit::<#values>();
+                    <#values as TS>::name(&cfg)
+                },
+            )),*];
+            let (action_sigs, action_fns) = <#model>::__plum_actions(&cfg, &mut visitor);
+
+            let mut out = String::from(concat!(
+                "// AUTO-GENERATED by plum from `", #model_name, "` — do not edit.\n",
+                "import { atom, type ReadableAtom } from \"nanostores\";\n\n",
             ));
+            for decl in named.values() {
+                writeln!(out, "export {decl}\n").unwrap();
+            }
+            writeln!(out, "export interface {}Stores {{", #pascal).unwrap();
+            for (key, _, ty) in &stores {
+                writeln!(out, "  {key}: ReadableAtom<{ty}>;").unwrap();
+            }
+            writeln!(out, "}}\n\nexport interface {}Actions {{\n{action_sigs}}}\n", #pascal).unwrap();
+            writeln!(out, "/** What bind{0} needs from the wasm class. */", #pascal).unwrap();
+            writeln!(out, "interface {0}Wasm extends {0}Actions {{", #pascal).unwrap();
+            for (_, watch, ty) in &stores {
+                writeln!(out, "  {watch}(cb: (v: {ty}) => void): number;").unwrap();
+            }
+            out.push_str(concat!(
+                "  dispose(): void;\n}\n\n",
+                "// Rust calls back with the current value inside watch*(), so a store\n",
+                "// never holds `undefined` by the time anyone can read it.\n",
+                "function readable<T>(watch: (cb: (v: T) => void) => number): ReadableAtom<T> {\n",
+                "  const store = atom<T>(undefined as T);\n",
+                "  watch((v) => store.set(v));\n",
+                "  return store;\n",
+                "}\n\n",
+            ));
+            writeln!(
+                out,
+                "export function bind{0}(model: {0}Wasm): {{\n  stores: {0}Stores;\n  actions: {0}Actions;\n  dispose: () => void;\n}} {{\n  return {{\n    stores: {{",
+                #pascal
+            )
+            .unwrap();
+            for (key, watch, _) in &stores {
+                writeln!(out, "      {key}: readable((cb) => model.{watch}(cb)),").unwrap();
+            }
+            write!(
+                out,
+                "    }},\n    actions: {{\n{action_fns}    }},\n    dispose: () => model.dispose(),\n  }};\n}}\n"
+            )
+            .unwrap();
+
+            let dir = ::std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("plum_gen");
+            let path = dir.join(#file);
+            if ::std::fs::read_to_string(&path).ok().as_deref() != Some(out.as_str()) {
+                ::std::fs::create_dir_all(&dir).unwrap();
+                ::std::fs::write(&path, out).unwrap();
+            }
         }
     }
-
-    out.push('\n');
-
-    // Stores interface
-    out.push_str(&format!("export interface {}Stores {{\n", pascal));
-    for w in watches {
-        let ts_var = &w.store_key;
-        out.push_str(&format!("  {}: ReadableAtom<{}>;\n", ts_var, w.ts_type));
-    }
-    out.push_str("}\n\n");
-
-    // The bridge plumbing on the wasm class: what bind needs, and what is
-    // hidden from the `actions` type handed to consumers.
-    out.push_str(&format!("interface {}WatchMethods {{\n", pascal));
-    for w in watches {
-        out.push_str(&format!(
-            "  {}(cb: (v: {}) => void): number;\n",
-            w.js_name, w.ts_type
-        ));
-    }
-    out.push_str("  unwatch(id: number): void;\n");
-    out.push_str("  dispose(): void;\n");
-    out.push_str("}\n\n");
-
-    // Rust pushes the current value synchronously inside watch*(), so a
-    // store never holds `undefined` by the time anyone can read it.
-    out.push_str(
-        "function readable<T>(watch: (cb: (v: T) => void) => number): ReadableAtom<T> {\n",
-    );
-    out.push_str("  const store = atom<T>(undefined as T);\n");
-    out.push_str("  watch((v) => store.set(v));\n");
-    out.push_str("  return store;\n");
-    out.push_str("}\n\n");
-
-    // Bind function (generic so actions retain their concrete signatures)
-    out.push_str(&format!(
-        "export function bind{}<M extends {}WatchMethods>(model: M): {{\n  stores: {}Stores;\n  actions: Omit<M, keyof {}WatchMethods | \"free\">;\n  dispose: () => void;\n}} {{\n",
-        pascal, pascal, pascal, pascal
-    ));
-    out.push_str("  return {\n");
-    out.push_str("    stores: {\n");
-    for w in watches {
-        out.push_str(&format!(
-            "      {}: readable((cb) => model.{}(cb)),\n",
-            w.store_key, w.js_name
-        ));
-    }
-    out.push_str("    },\n");
-    out.push_str("    actions: model,\n");
-    // The Rust-side dispose() also stops every watch.
-    out.push_str("    dispose: () => model.dispose(),\n");
-    out.push_str("  };\n");
-    out.push_str("}\n");
-
-    out
-}
-
-/// Extract the base type name from a TS type string (strip [] and | null).
-fn extract_base_type(ts_type: &str) -> &str {
-    let s = ts_type.trim();
-    // Strip trailing []
-    let s = s.strip_suffix("[]").unwrap_or(s);
-    // Strip " | null"
-    let s = s.strip_suffix(" | null").unwrap_or(s);
-    s.trim()
-}
-
-/// Returns true if the type is a TS built-in primitive (should not be imported).
-fn is_ts_primitive(ty: &str) -> bool {
-    matches!(
-        ty,
-        "number" | "boolean" | "string" | "void" | "any" | "unknown" | "null" | "undefined"
-    )
-}
-
-/// Write the TS file to plum_gen/ only if content changed.
-fn write_ts_file(file_name: &str, content: &str) -> Result<(), String> {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .map_err(|e| format!("CARGO_MANIFEST_DIR not set: {}", e))?;
-    let dir = format!("{}/plum_gen", manifest_dir);
-    let path = format!("{}/{}.ts", dir, file_name);
-
-    // Read existing content
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    if existing == content {
-        return Ok(());
-    }
-
-    std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create {}: {}", dir, e))?;
-    std::fs::write(&path, content).map_err(|e| format!("failed to write {}: {}", path, e))
 }

@@ -12,7 +12,7 @@
     "dev": "node scripts/ensure-wasm.mjs && npm run dev -w todomvc-app",
     "dev:rust": "watchexec -w examples/todomvc/model -w rust -e rs -e toml -- npm run build:wasm",
     "build": "npm run build:wasm && npm run build:web",
-    "build:wasm": "wasm-pack build examples/todomvc/model --target web --features plum",
+    "build:wasm": "cargo test -p todomvc-model __plum_export && wasm-pack build examples/todomvc/model --target web --features plum",
     "build:web": "npm run build -w todomvc-app",
     "preview": "npm run preview -w todomvc-app",
     "test": "cargo test --workspace",
