@@ -1,23 +1,22 @@
-import { useState } from "react";
+import { useStore } from "@nanostores/react";
 import { todos } from "@todomvc/model";
 
 export default function NewTodoForm() {
-  const [text, setText] = useState("");
+  const text = useStore(todos.stores.inputText);
 
   return (
     <form
       className="plum-add"
       onSubmit={(e) => {
         e.preventDefault();
-        // add() ignores blank text and returns -1
-        if (todos.actions.add(text) >= 0) setText("");
+        todos.actions.submitNew();
       }}
     >
       <input
         aria-label="New todo"
         value={text}
         placeholder="What needs to be done?"
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => todos.actions.setInputText(e.target.value)}
       />
       <button type="submit">Add</button>
     </form>

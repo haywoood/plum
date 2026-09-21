@@ -265,12 +265,12 @@ it inside components and functions, not at the top level of a module.
   whether or not anything subscribes to the store.
 - The first value is delivered synchronously, so a store is never
   `undefined`.
-- Later values arrive when Leptos re-runs the effect. That is on a later
-  microtask, not during the action call, and several writes in the same turn
-  produce one update.
-- Because of that, do not drive a controlled text input from a store. The
-  value comes back a tick late and React moves the caret to the end of the
-  field. Keep keystroke state in the view and call an action on submit.
+- When an action returns, every store it affected already holds the new
+  value. Leptos runs effects on a later tick, so the generated action wrapper
+  flushes the bridge before it returns. A store can therefore back a
+  controlled text input, as `inputText` does in the example.
+- Changes that do not come from a JS call, such as an async load finishing,
+  arrive when Leptos runs the effect. A value is never delivered twice.
 - Values are serialized whole. A `Vec` signal sends the entire array on every
   change. `None` arrives as `null`.
 - Stores are read-only. Writes go through actions.

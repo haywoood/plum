@@ -1,30 +1,14 @@
-import { useState } from "react";
+import { useStore } from "@nanostores/react";
 import { todos, type Todo } from "@todomvc/model";
+import EditTodoInput from "./EditTodoInput";
 
 export default function TodoItem({ todo }: { todo: Todo }) {
-  // null while not editing
-  const [draft, setDraft] = useState<string | null>(null);
-
-  const commit = () => {
-    if (draft !== null) todos.actions.edit(todo.id, draft);
-    setDraft(null);
-  };
+  const editingId = useStore(todos.stores.editingId);
 
   return (
     <li className={todo.done ? "is-done" : ""}>
-      {draft !== null ? (
-        <input
-          className="plum-edit"
-          aria-label="Edit todo"
-          value={draft}
-          autoFocus
-          onChange={(e) => setDraft(e.target.value)}
-          onBlur={commit}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") commit();
-            if (e.key === "Escape") setDraft(null);
-          }}
-        />
+      {editingId === todo.id ? (
+        <EditTodoInput />
       ) : (
         <label className="plum-label">
           <input
@@ -33,7 +17,7 @@ export default function TodoItem({ todo }: { todo: Todo }) {
             checked={todo.done}
             onChange={() => todos.actions.toggle(todo.id)}
           />
-          <span onDoubleClick={() => setDraft(todo.text)}>{todo.text}</span>
+          <span onDoubleClick={() => todos.actions.startEdit(todo.id)}>{todo.text}</span>
         </label>
       )}
       <button

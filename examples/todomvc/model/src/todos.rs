@@ -8,7 +8,9 @@
 //! - toggle / remove / `clear_completed`;
 //! - `toggle_all`: if nothing is left, uncheck everything, else check all;
 //! - `remaining` / `completed` / `visible` (filtered) are Leptos memos;
-//! - the filter is model state (`All` / `Active` / `Completed`);
+//! - the filter is model state (`All` / `Active` / `Completed`), and so is
+//!   everything the view would otherwise keep for itself: the new-todo text,
+//!   which row is being edited, and the text of that edit;
 //! - persistence: `load()` reads from storage, `save()` writes to storage,
 //!   and an autosave `Effect` triggers `save` whenever the list is dirtied.
 
@@ -59,6 +61,9 @@ pub struct Todos {
     list: RwSignal<Vec<Todo>>,
     #[plum(watch)]
     filter: RwSignal<Filter>,
+    /// Every filter, in display order.
+    #[plum(watch)]
+    filters: Memo<Vec<Filter>>,
     next_id: RwSignal<i32>,
     loaded: RwSignal<bool>,
     #[plum(watch)]
@@ -75,6 +80,14 @@ pub struct Todos {
     saving: RwSignal<bool>,
     #[plum(watch)]
     last_error: RwSignal<Option<String>>,
+    /// Text of the new-todo field.
+    #[plum(watch)]
+    input_text: RwSignal<String>,
+    /// The todo being edited, if any, and the text of that edit.
+    #[plum(watch)]
+    editing_id: RwSignal<Option<i32>>,
+    #[plum(watch)]
+    edit_text: RwSignal<String>,
     dirty: RwSignal<bool>,
     autosave: Effect<LocalStorage>,
     storage: Storage,
@@ -98,7 +111,11 @@ impl Todos {
         let dirty = RwSignal::new(false);
         let saving = RwSignal::new(false);
         let last_error = RwSignal::new(None);
+        let input_text = RwSignal::new(String::new());
+        let editing_id = RwSignal::new(None);
+        let edit_text = RwSignal::new(String::new());
 
+        let filters = Memo::new(|_| vec![Filter::All, Filter::Active, Filter::Completed]);
         let remaining = Memo::new(move |_| list.get().iter().filter(|t| !t.done).count() as i32);
         let completed = Memo::new(move |_| list.get().iter().filter(|t| t.done).count() as i32);
         let total = Memo::new(move |_| list.get().len() as i32);
@@ -141,6 +158,7 @@ impl Todos {
         Self {
             list,
             filter,
+            filters,
             next_id,
             loaded,
             remaining,
@@ -150,6 +168,9 @@ impl Todos {
             visible,
             saving,
             last_error,
+            input_text,
+            editing_id,
+            edit_text,
             dirty,
             autosave,
             storage,
@@ -161,6 +182,9 @@ impl Todos {
     }
     pub fn filter(&self) -> RwSignal<Filter> {
         self.filter
+    }
+    pub fn filters(&self) -> Memo<Vec<Filter>> {
+        self.filters
     }
     pub fn total(&self) -> Memo<i32> {
         self.total
@@ -185,6 +209,15 @@ impl Todos {
     /// Message from the last failed load/save, if any.
     pub fn last_error(&self) -> RwSignal<Option<String>> {
         self.last_error
+    }
+    pub fn input_text(&self) -> RwSignal<String> {
+        self.input_text
+    }
+    pub fn editing_id(&self) -> RwSignal<Option<i32>> {
+        self.editing_id
+    }
+    pub fn edit_text(&self) -> RwSignal<String> {
+        self.edit_text
     }
 
     /// Loads the list from the storage backend.
@@ -241,6 +274,57 @@ impl Todos {
         self.list.set(todos);
         self.mark_dirty();
         id
+    }
+
+    pub fn set_input_text(&self, text: &str) {
+        self.input_text.set(text.to_string());
+    }
+
+    /// The new-todo form was submitted: add what was typed and clear the
+    /// field. Blank text is ignored and left in place.
+    pub fn submit_new(&self) {
+        if self.add(&self.input_text.get()) >= 0 {
+            self.input_text.set(String::new());
+        }
+    }
+
+    pub fn start_edit(&self, id: i32) {
+        let text = self
+            .list
+            .get()
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.text.clone());
+        if let Some(text) = text {
+            self.editing_id.set(Some(id));
+            self.edit_text.set(text);
+        }
+    }
+
+    pub fn set_edit_text(&self, text: &str) {
+        self.edit_text.set(text.to_string());
+    }
+
+    /// A key was pressed in the edit field: Enter commits, Escape cancels.
+    pub fn edit_key(&self, key: &str) {
+        match key {
+            "Enter" => self.commit_edit(),
+            "Escape" => self.cancel_edit(),
+            _ => {}
+        }
+    }
+
+    /// Applies the edit in progress, if there is one.
+    pub fn commit_edit(&self) {
+        if let Some(id) = self.editing_id.get() {
+            self.edit(id, &self.edit_text.get());
+        }
+        self.cancel_edit();
+    }
+
+    pub fn cancel_edit(&self) {
+        self.editing_id.set(None);
+        self.edit_text.set(String::new());
     }
 
     /// Edits a todo's text (trimmed). An empty result removes the todo —
@@ -398,6 +482,36 @@ mod tests {
 
         t.remove(a);
         assert!(t.list().get().is_empty());
+    }
+
+    #[test]
+    fn form_and_edit_events() {
+        let (storage, _) = mem_storage(false);
+        let t = Todos::with_storage(storage);
+
+        t.set_input_text("   ");
+        t.submit_new();
+        assert!(t.list().get().is_empty());
+        assert_eq!(t.input_text().get(), "   ", "blank text stays in the field");
+
+        t.set_input_text("write docs");
+        t.submit_new();
+        assert_eq!(t.list().get()[0].text, "write docs");
+        assert_eq!(t.input_text().get(), "");
+
+        t.start_edit(1);
+        assert_eq!(t.edit_text().get(), "write docs");
+        t.set_edit_text("changed my mind");
+        t.edit_key("Escape");
+        assert_eq!(t.list().get()[0].text, "write docs");
+        assert_eq!(t.editing_id().get(), None);
+
+        t.start_edit(1);
+        t.set_edit_text("write the docs");
+        t.edit_key("Enter");
+        assert_eq!(t.list().get()[0].text, "write the docs");
+        t.commit_edit(); // a blur after Enter has nothing left to apply
+        assert_eq!(t.list().get()[0].text, "write the docs");
     }
 
     #[test]
