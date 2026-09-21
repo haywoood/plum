@@ -21,15 +21,15 @@ npm run dev
 
 ## Files to read
 
-| File                            | What it shows                                                                                  |
-| ------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `model/src/platform_data.rs`    | A service that keeps named values for everything on the page, without knowing what they are    |
-| `model/src/todos.rs`            | CRUD and computed lenses over platform data, with `#[derive(PlumModel)]` and `#[plum_actions]` |
-| `model/src/storage.rs`          | `localStorage` behind a seam, so the model also runs natively                                  |
-| `model/src/runtime.rs`          | Executor and owner setup for running the model without a view                                  |
-| `model/index.ts`                | The package entry point: `init()`, `todos` and `platformdata`                                  |
-| `model/plum_gen/todos.ts`       | Generated binding (after a build)                                                              |
-| `app/src/main.tsx`              | The one `init()` call                                                                          |
-| `app/src/todos/CountBar.tsx`    | A component that reads two stores and calls one action                                         |
-| `app/src/todos/NewTodoForm.tsx` | A controlled input on a writable store: `inputText.set(...)`                                   |
-| `app/src/todos/TodoItem.tsx`    | A store that takes an argument: `isEditing(todo.id)`                                           |
+| File                            | What it shows                                                                |
+| ------------------------------- | ---------------------------------------------------------------------------- |
+| `model/src/platform_data.rs`    | A service that keeps named JSON values for code that has no model of its own |
+| `model/src/todos.rs`            | The todos model, with `#[derive(PlumModel)]` and `#[plum_actions]`           |
+| `model/src/storage.rs`          | `localStorage` behind a seam, so the model also runs natively                |
+| `model/src/runtime.rs`          | Executor and owner setup for running the model without a view                |
+| `model/index.ts`                | The package entry point: `init()`, `todos` and `platformdata`                |
+| `model/plum_gen/todos.ts`       | Generated binding (after a build)                                            |
+| `app/src/main.tsx`              | The one `init()` call                                                        |
+| `app/src/todos/CountBar.tsx`    | A component that reads two stores and calls one action                       |
+| `app/src/todos/NewTodoForm.tsx` | A controlled input on a writable store: `inputText.set(...)`                 |
+| `app/src/todos/TodoItem.tsx`    | A store that takes an argument: `isEditing(todo.id)`                         |

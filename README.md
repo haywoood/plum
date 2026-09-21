@@ -326,7 +326,8 @@ the top level of a module.
 
 Not part of plum, but something it makes possible, and the example does it.
 `examples/todomvc/model/src/platform_data.rs` is a service that keeps named
-values for whoever is on the page:
+values for whoever is on the page: "platform, store this and make it
+accessible".
 
 ```ts
 platformdata.createStore("cart/state", { items: 0 });
@@ -335,23 +336,22 @@ platformdata.getStore<Cart>("cart/state").set({ items: 1 });
 ```
 
 - The data is ad hoc. Teams create the stores they need, and the service
-  neither knows nor checks what is in them: a value is JSON, and the type
-  parameter of `getStore` is the caller's claim, not a check.
+  neither knows nor checks what is in them. The type parameter of `getStore`
+  is the caller's claim, not a check.
 - `getStore(name)` is a store that takes an argument, so the same name gives
   the same store to everyone, and it can be subscribed to before the store
   has been created. Creating a name twice throws.
-- Rust models are clients like any other, and find the service through
-  Leptos context. The todos model keeps all of its state there under its
-  own name, reads it back as Rust types, and is itself only CRUD logic and
-  what is computed from those values. A value it cannot read counts as
-  empty.
+- Values are JSON, on purpose. The service could hold JS values as they
+  are and skip the serialization, but then platform state could contain
+  functions and class instances, and would stop being something you can
+  print, diff or persist.
+- It is for state that has no model of its own. A model written in Rust,
+  like the todos, keeps its state in its own signals: it is in the same wasm
+  instance anyway, and typed.
 
-Two things to know before building on this. Every write crosses into wasm
-and back as JSON, which is fine for state and wrong for large values that
-change on every keystroke. And "the same name gives the same store" only
-holds if every microfrontend uses one instance of the package, so it has to
-be a shared module (an import map or the bundler's equivalent), not bundled
-into each of them.
+"The same name gives the same store" only holds if every microfrontend uses
+one instance of the package, so it has to be a shared module (an import map
+or the bundler's equivalent), not bundled into each of them.
 
 ## Not there yet
 

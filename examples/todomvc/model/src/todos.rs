@@ -1,19 +1,16 @@
-//! The TodoMVC model: CRUD logic and computed lenses over platform data.
+//! The TodoMVC model: state, CRUD and everything computed from the state.
 //!
-//! The state itself (the list, the filter, the text being typed, which row is
-//! being edited) lives in [`PlatformData`] under this model's name, where
-//! anyone on the platform can read it. The platform does not know what these
-//! values are; this model does, and reads them back as Rust types. What is
-//! here is what gives that state meaning:
+//! The behaviour is that of the official Leptos TodoMVC, with the view
+//! removed:
 //!
-//! - lenses: the list and filter read back as Rust types, and everything
-//!   computed from them (`remaining`, `visible`, the filter bar, and every
-//!   yes/no question the view has, so that it never compares, counts or
-//!   formats anything itself);
-//! - CRUD, with the behaviour of the official Leptos TodoMVC: add on
-//!   non-empty trimmed text, an edit to empty text removes the todo,
+//! - add on non-empty trimmed text; an edit to empty text removes the todo;
 //!   `toggle_all` unchecks everything when nothing is left and checks all
 //!   otherwise;
+//! - everything the view shows is computed here (`remaining`, `visible`, the
+//!   filter bar, and every yes/no question the view has), so that it never
+//!   compares, counts or formats anything itself;
+//! - what the view would otherwise keep for itself is state here too: the
+//!   new-todo text, which row is being edited and the text of that edit;
 //! - persistence: loading and saving are Leptos `Action`s that `load()` and
 //!   `save()` dispatch, an autosave `Effect` dispatches a save whenever the
 //!   list is dirtied, and `saving` / `last_error` are derived from them.
@@ -26,8 +23,6 @@ use ts_rs::TS;
 
 use plum_macro::{plum_actions, PlumModel};
 
-use crate::PlatformData;
-
 /// One row of the list (plain data; crosses to JS as a plain object).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct Todo {
@@ -37,10 +32,9 @@ pub struct Todo {
 }
 
 /// Which slice of the list the view shows.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 pub enum Filter {
-    #[default]
     All,
     Active,
     Completed,
@@ -68,39 +62,13 @@ pub struct Storage {
     pub save: std::sync::Arc<dyn Fn(Vec<Todo>) -> SaveFuture>,
 }
 
-/// A platform store read as a `T`. The platform holds whatever it was given,
-/// so anything that is not a `T` reads as `T::default()`.
-fn lens<T>(data: PlatformData, key: &str) -> Memo<T>
-where
-    T: serde::de::DeserializeOwned + Default + PartialEq + Clone + Send + Sync + 'static,
-{
-    let value = data.get_store(key);
-    Memo::new(move |_| serde_json::from_value(value.get()).unwrap_or_default())
-}
-
-fn write<T: Serialize>(data: PlatformData, key: &str, value: &T) {
-    data.set(key, serde_json::to_value(value).expect("plain data"));
-}
-
-/// The names of this model's stores in the platform data.
-struct Keys {
-    list: String,
-    next_id: String,
-    filter: String,
-    input_text: String,
-    editing_id: String,
-    edit_text: String,
-}
-
 #[derive(PlumModel)]
 pub struct Todos {
-    data: PlatformData,
-    keys: Keys,
     #[plum(watch, js = "Todos")]
-    list: Memo<Vec<Todo>>,
-    next_id: Memo<i32>,
+    list: RwSignal<Vec<Todo>>,
+    next_id: RwSignal<i32>,
     #[plum(watch)]
-    filter: Memo<Filter>,
+    filter: RwSignal<Filter>,
     /// Every filter, in display order, with the current one selected.
     #[plum(watch)]
     filters: Memo<Vec<FilterOption>>,
@@ -129,13 +97,13 @@ pub struct Todos {
     #[plum(watch)]
     has_error: Memo<bool>,
     /// Text of the new-todo field. The view writes it with `inputText.set`.
-    #[plum(watch, set = "set_input_text")]
-    input_text: Memo<String>,
+    #[plum(watch, set)]
+    input_text: RwSignal<String>,
     /// The todo being edited, if any. Views ask `is_editing(id)`.
-    editing_id: Memo<Option<i32>>,
-    /// The text of that edit.
-    #[plum(watch, set = "set_edit_text")]
-    edit_text: Memo<String>,
+    editing_id: RwSignal<Option<i32>>,
+    /// The text of that edit, written by the view the same way.
+    #[plum(watch, set)]
+    edit_text: RwSignal<String>,
     dirty: RwSignal<bool>,
     autosave: Effect<LocalStorage>,
     load_action: Action<(), Result<(), String>>,
@@ -144,41 +112,22 @@ pub struct Todos {
 
 #[plum_actions]
 impl Todos {
-    /// Creates the model on the default storage backend for the target.
-    /// `name` prefixes its stores in the platform data and is the key the
-    /// list is persisted under, so two models with different names do not
-    /// share anything.
-    pub fn new(name: &str) -> Self {
-        Self::with_storage(name, crate::storage::local_storage(name))
+    /// Creates the model on the default storage backend for the target,
+    /// keeping the list under `storage_key`.
+    pub fn new(storage_key: &str) -> Self {
+        Self::with_storage(crate::storage::local_storage(storage_key))
     }
 
     /// Creates the model with an explicit storage backend (used by tests).
-    pub fn with_storage(name: &str, storage: Storage) -> Self {
-        let data = PlatformData::new();
-        let key = |part: &str| format!("{name}/{part}");
-        let keys = Keys {
-            list: key("list"),
-            next_id: key("nextId"),
-            filter: key("filter"),
-            input_text: key("inputText"),
-            editing_id: key("editingId"),
-            edit_text: key("editText"),
-        };
-        // A second model with the same name finds these already there and
-        // becomes another view of the same state.
-        let _ = data.create_store(&keys.list, serde_json::json!([]));
-        let _ = data.create_store(&keys.next_id, serde_json::json!(1));
-        let _ = data.create_store(&keys.filter, serde_json::json!("all"));
-        let _ = data.create_store(&keys.input_text, serde_json::json!(""));
-        let _ = data.create_store(&keys.editing_id, serde_json::json!(null));
-        let _ = data.create_store(&keys.edit_text, serde_json::json!(""));
+    pub fn with_storage(storage: Storage) -> Self {
+        crate::runtime::ensure_init();
 
-        let list = lens::<Vec<Todo>>(data, &keys.list);
-        let next_id = lens::<i32>(data, &keys.next_id);
-        let filter = lens::<Filter>(data, &keys.filter);
-        let input_text = lens::<String>(data, &keys.input_text);
-        let editing_id = lens::<Option<i32>>(data, &keys.editing_id);
-        let edit_text = lens::<String>(data, &keys.edit_text);
+        let list: RwSignal<Vec<Todo>> = RwSignal::new(Vec::new());
+        let next_id = RwSignal::new(1);
+        let filter = RwSignal::new(Filter::All);
+        let input_text = RwSignal::new(String::new());
+        let editing_id = RwSignal::new(None);
+        let edit_text = RwSignal::new(String::new());
 
         let filters = Memo::new(move |_| {
             let current = filter.get();
@@ -219,15 +168,13 @@ impl Todos {
         // `new_local` because the wasm storage futures are not `Send`.
         let load_action = Action::new_local({
             let storage = storage.clone();
-            let (list_key, next_id_key) = (keys.list.clone(), keys.next_id.clone());
             move |_: &()| {
                 let loading = (storage.load)();
-                let (list_key, next_id_key) = (list_key.clone(), next_id_key.clone());
                 async move {
                     let todos = loading.await?;
                     let max_id = todos.iter().map(|t| t.id).max().unwrap_or(0);
-                    write(data, &next_id_key, &(max_id + 1));
-                    write(data, &list_key, &todos);
+                    next_id.set(max_id + 1);
+                    list.set(todos);
                     loaded.set(true);
                     Ok(())
                 }
@@ -254,8 +201,6 @@ impl Todos {
         });
 
         Self {
-            data,
-            keys,
             list,
             next_id,
             filter,
@@ -282,9 +227,7 @@ impl Todos {
 
     /// Applies a change to the list and marks it for saving.
     fn update_list(&self, change: impl FnOnce(&mut Vec<Todo>)) {
-        let mut todos = self.list.get();
-        change(&mut todos);
-        write(self.data, &self.keys.list, &todos);
+        self.list.update(change);
         self.dirty.set(true);
     }
 
@@ -309,7 +252,7 @@ impl Todos {
             return -1;
         }
         let id = self.next_id.get();
-        write(self.data, &self.keys.next_id, &(id + 1));
+        self.next_id.set(id + 1);
         self.update_list(|todos| {
             todos.push(Todo {
                 id,
@@ -320,15 +263,11 @@ impl Todos {
         id
     }
 
-    pub fn set_input_text(&self, text: &str) {
-        write(self.data, &self.keys.input_text, &text);
-    }
-
     /// The new-todo form was submitted: add what was typed and clear the
     /// field. Blank text is ignored and left in place.
     pub fn submit_new(&self) {
         if self.add(&self.input_text.get()) >= 0 {
-            self.set_input_text("");
+            self.input_text.set(String::new());
         }
     }
 
@@ -348,13 +287,9 @@ impl Todos {
             .find(|t| t.id == id)
             .map(|t| t.text.clone());
         if let Some(text) = text {
-            write(self.data, &self.keys.editing_id, &Some(id));
-            self.set_edit_text(&text);
+            self.editing_id.set(Some(id));
+            self.edit_text.set(text);
         }
-    }
-
-    pub fn set_edit_text(&self, text: &str) {
-        write(self.data, &self.keys.edit_text, &text);
     }
 
     /// A key was pressed in the edit field: Enter commits, Escape cancels.
@@ -375,8 +310,8 @@ impl Todos {
     }
 
     pub fn cancel_edit(&self) {
-        write(self.data, &self.keys.editing_id, &None::<i32>);
-        self.set_edit_text("");
+        self.editing_id.set(None);
+        self.edit_text.set(String::new());
     }
 
     /// Edits a todo's text (trimmed). An empty result removes the todo —
@@ -420,7 +355,7 @@ impl Todos {
     }
 
     pub fn set_filter(&self, filter: Filter) {
-        write(self.data, &self.keys.filter, &filter);
+        self.filter.set(filter);
     }
 
     /// Stops the autosave effect. In-flight async work completes naturally.
@@ -482,7 +417,7 @@ mod tests {
     #[test]
     fn crud_and_memos() {
         let (storage, _) = mem_storage(false);
-        let t = Todos::with_storage("todos", storage);
+        let t = Todos::with_storage(storage);
         t.load();
         crate::runtime::pump();
         assert!(t.list.get().is_empty());
@@ -519,14 +454,14 @@ mod tests {
     #[test]
     fn form_and_edit_events() {
         let (storage, _) = mem_storage(false);
-        let t = Todos::with_storage("todos", storage);
+        let t = Todos::with_storage(storage);
 
-        t.set_input_text("   ");
+        t.input_text.set("   ".into());
         t.submit_new();
         assert!(t.list.get().is_empty());
         assert_eq!(t.input_text.get(), "   ", "blank text stays in the field");
 
-        t.set_input_text("write docs");
+        t.input_text.set("write docs".into());
         t.submit_new();
         assert_eq!(t.list.get()[0].text, "write docs");
         assert_eq!(t.input_text.get(), "");
@@ -534,14 +469,14 @@ mod tests {
         t.start_edit(1);
         assert!(t.is_editing(1).get() && !t.is_editing(2).get());
         assert_eq!(t.edit_text.get(), "write docs");
-        t.set_edit_text("changed my mind");
+        t.edit_text.set("changed my mind".into());
         t.edit_key("Escape");
         assert_eq!(t.list.get()[0].text, "write docs");
         assert_eq!(t.editing_id.get(), None);
         assert!(!t.is_editing(1).get());
 
         t.start_edit(1);
-        t.set_edit_text("write the docs");
+        t.edit_text.set("write the docs".into());
         t.edit_key("Enter");
         assert_eq!(t.list.get()[0].text, "write the docs");
         t.commit_edit(); // a blur after Enter has nothing left to apply
@@ -549,29 +484,9 @@ mod tests {
     }
 
     #[test]
-    fn the_state_is_in_the_platform_data() {
-        let (storage, _) = mem_storage(false);
-        let t = Todos::with_storage("todos", storage);
-        let data = PlatformData::new();
-        let raw = data.get_store("todos/list");
-
-        t.add("seen from outside");
-        assert_eq!(raw.get()[0]["text"], "seen from outside");
-
-        // Anyone can write a store. The model reads what it can.
-        data.set(
-            "todos/list",
-            serde_json::json!([{ "id": 9, "text": "put there", "done": true }]),
-        );
-        assert_eq!((t.completed.get(), t.remaining.get()), (1, 0));
-        data.set("todos/list", serde_json::json!("not a list"));
-        assert!(t.is_empty.get());
-    }
-
-    #[test]
     fn toggle_all_uses_official_semantics() {
         let (storage, _) = mem_storage(false);
-        let t = Todos::with_storage("todos", storage);
+        let t = Todos::with_storage(storage);
         let a = t.add("one");
         let b = t.add("two");
 
@@ -588,7 +503,7 @@ mod tests {
     #[test]
     fn clear_completed_keeps_active_only() {
         let (storage, _) = mem_storage(false);
-        let t = Todos::with_storage("todos", storage);
+        let t = Todos::with_storage(storage);
         let a = t.add("keep");
         let b = t.add("done one");
         t.toggle(b);
@@ -606,7 +521,7 @@ mod tests {
     #[test]
     fn autosave_writes_back_through_the_seam() {
         let (storage, mem) = mem_storage(false);
-        let t = Todos::with_storage("todos", storage);
+        let t = Todos::with_storage(storage);
         t.load();
         crate::runtime::pump();
         assert!(t.list.get().is_empty());
@@ -628,7 +543,7 @@ mod tests {
     fn load_restores_persisted_state() {
         let (storage, mem) = mem_storage(false);
         *mem.lock().unwrap() = sample();
-        let t = Todos::with_storage("todos", storage);
+        let t = Todos::with_storage(storage);
         t.load();
         crate::runtime::pump();
         assert_eq!(t.list.get(), sample());
@@ -639,7 +554,7 @@ mod tests {
     #[test]
     fn save_failure_surfaces_in_last_error() {
         let (storage, _) = mem_storage(true);
-        let t = Todos::with_storage("todos", storage);
+        let t = Todos::with_storage(storage);
         t.load();
         crate::runtime::pump();
         t.add("boom");
@@ -652,7 +567,7 @@ mod tests {
     #[test]
     fn dispose_stops_autosave_and_aborts() {
         let (storage, mem) = mem_storage(false);
-        let t = Todos::with_storage("todos", storage);
+        let t = Todos::with_storage(storage);
         t.load();
         crate::runtime::pump();
         t.dispose();
