@@ -141,7 +141,9 @@ fn expand_method(func: &ImplItemFn) -> Option<TokenStream> {
             #[::wasm_bindgen::prelude::wasm_bindgen(js_name = #js_name_lit)]
             pub fn #name(&self, #wasm_params) #ret_type {
                 #(#conversions)*
-                self.core.#name(#(#call_args),*)
+                let out = self.core.#name(#(#call_args),*);
+                self.bridge.flush();
+                out
             }
         });
     }
@@ -153,7 +155,9 @@ fn expand_method(func: &ImplItemFn) -> Option<TokenStream> {
             #[::wasm_bindgen::prelude::wasm_bindgen(js_name = #js_name_lit)]
             pub fn #name(&self, #wasm_params) -> Option<::wasm_bindgen::JsValue> {
                 #(#conversions)*
-                self.core.#name(#(#call_args),*).map(|v| ::serde_wasm_bindgen::to_value(&v).unwrap())
+                let out = self.core.#name(#(#call_args),*);
+                self.bridge.flush();
+                out.map(|v| ::serde_wasm_bindgen::to_value(&v).unwrap())
             }
         })
     } else {
@@ -162,7 +166,9 @@ fn expand_method(func: &ImplItemFn) -> Option<TokenStream> {
             #[::wasm_bindgen::prelude::wasm_bindgen(js_name = #js_name_lit)]
             pub fn #name(&self, #wasm_params) -> ::wasm_bindgen::JsValue {
                 #(#conversions)*
-                ::serde_wasm_bindgen::to_value(&self.core.#name(#(#call_args),*)).unwrap()
+                let out = self.core.#name(#(#call_args),*);
+                self.bridge.flush();
+                ::serde_wasm_bindgen::to_value(&out).unwrap()
             }
         })
     }

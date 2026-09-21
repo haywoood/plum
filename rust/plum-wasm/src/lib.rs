@@ -8,7 +8,7 @@
 //!
 //! - [`bridge::Bridge`] — an effect-driven subscription registry: each JS
 //!   `watch` becomes one Leptos `Effect` that pushes values to a JS callback;
-//!   `unwatch` stops the effect. No model code lives here.
+//!   `unwatch` stops it, and `flush` delivers pending changes right away.
 //! - [`bridge::Payload`] — the value types that cross to JS (app crates
 //!   build payloads explicitly in their watch closures).
 //! - [`js`] (wasm only) — minimal helpers for dynamic host I/O
@@ -25,7 +25,7 @@ pub mod runtime;
 #[cfg(target_arch = "wasm32")]
 pub mod js;
 
-pub use bridge::{Bridge, Notifier, Payload};
+pub use bridge::{Bridge, Payload};
 
 /// Declarative bridge generation. See the `plum-macro` crate for details.
 ///
