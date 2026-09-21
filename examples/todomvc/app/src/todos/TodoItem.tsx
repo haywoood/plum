@@ -3,11 +3,11 @@ import { todos, type Todo } from "@todomvc/model";
 import EditTodoInput from "./EditTodoInput";
 
 export default function TodoItem({ todo }: { todo: Todo }) {
-  const editingId = useStore(todos.stores.editingId);
+  const editing = useStore(todos.stores.isEditing(todo.id));
 
   return (
     <li className={todo.done ? "is-done" : ""}>
-      {editingId === todo.id ? (
+      {editing ? (
         <EditTodoInput />
       ) : (
         <label className="plum-label">

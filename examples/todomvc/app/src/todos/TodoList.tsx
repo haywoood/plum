@@ -4,8 +4,9 @@ import TodoItem from "./TodoItem";
 
 export default function TodoList() {
   const visible = useStore(todos.stores.visible);
+  const hasVisible = useStore(todos.stores.hasVisible);
 
-  if (visible.length === 0) {
+  if (!hasVisible) {
     return <p className="plum-empty">Nothing to show.</p>;
   }
 

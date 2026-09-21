@@ -8,7 +8,9 @@ removed.
   `index.ts` and `package.json` wrap its wasm build as the `@todomvc/model`
   npm package. `pkg/` and `plum_gen/` appear here after a build.
 - `app/` is what the front-end team owns: React, `@nanostores/react`, and a
-  dependency on `@todomvc/model`.
+  dependency on `@todomvc/model`. Its components keep no state and compute
+  nothing. They render stores, branch on booleans the model gives them, and
+  pass DOM events to actions.
 
 Run it from the repository root:
 
@@ -29,3 +31,4 @@ npm run dev
 | `app/src/main.tsx`              | The one `init()` call                                          |
 | `app/src/todos/CountBar.tsx`    | A component that reads two stores and calls one action         |
 | `app/src/todos/NewTodoForm.tsx` | A controlled input backed by a store; submitting is one action |
+| `app/src/todos/TodoItem.tsx`    | A store that takes an argument: `isEditing(todo.id)`           |

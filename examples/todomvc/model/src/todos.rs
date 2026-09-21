@@ -7,7 +7,10 @@
 //! - edit; saving an empty title removes the todo;
 //! - toggle / remove / `clear_completed`;
 //! - `toggle_all`: if nothing is left, uncheck everything, else check all;
-//! - `remaining` / `completed` / `visible` (filtered) are Leptos memos;
+//! - `remaining` / `completed` / `visible` (filtered) are Leptos memos, and
+//!   so is every yes/no question the view has (`has_visible`, `is_empty`,
+//!   `has_completed`, `is_editing(id)`, ...): the view never compares,
+//!   counts or formats anything itself;
 //! - the filter is model state (`All` / `Active` / `Completed`), and so is
 //!   everything the view would otherwise keep for itself: the new-todo text,
 //!   which row is being edited, and the text of that edit;
@@ -40,6 +43,14 @@ pub enum Filter {
     Completed,
 }
 
+/// One button of the filter bar, ready to render.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct FilterOption {
+    pub filter: Filter,
+    pub label: String,
+    pub selected: bool,
+}
+
 /// A future that resolves to a loaded todo list.
 pub type LoadFuture =
     std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<Vec<Todo>, String>>>>;
@@ -62,32 +73,40 @@ pub struct Todos {
     list: RwSignal<Vec<Todo>>,
     #[plum(watch)]
     filter: RwSignal<Filter>,
-    /// Every filter, in display order.
+    /// Every filter, in display order, with the current one selected.
     #[plum(watch)]
-    filters: Memo<Vec<Filter>>,
+    filters: Memo<Vec<FilterOption>>,
     next_id: RwSignal<i32>,
     #[plum(watch)]
     remaining: Memo<i32>,
     #[plum(watch)]
     completed: Memo<i32>,
+    /// There are no todos at all.
     #[plum(watch)]
-    total: Memo<i32>,
+    is_empty: Memo<bool>,
+    #[plum(watch)]
+    has_completed: Memo<bool>,
     #[plum(watch)]
     all_done: Memo<bool>,
     #[plum(watch)]
     visible: Memo<Vec<Todo>>,
+    /// The current filter lets at least one todo through.
+    #[plum(watch)]
+    has_visible: Memo<bool>,
     /// True while a save is in flight.
     #[plum(watch)]
     saving: Memo<bool>,
     /// What went wrong in the last save, or else in the load.
     #[plum(watch)]
     last_error: Memo<Option<String>>,
+    #[plum(watch)]
+    has_error: Memo<bool>,
     /// Text of the new-todo field.
     #[plum(watch)]
     input_text: RwSignal<String>,
-    /// The todo being edited, if any, and the text of that edit.
-    #[plum(watch)]
+    /// The todo being edited, if any. Views ask `is_editing(id)`.
     editing_id: RwSignal<Option<i32>>,
+    /// The text of that edit.
     #[plum(watch)]
     edit_text: RwSignal<String>,
     dirty: RwSignal<bool>,
@@ -117,10 +136,25 @@ impl Todos {
         let editing_id = RwSignal::new(None);
         let edit_text = RwSignal::new(String::new());
 
-        let filters = Memo::new(|_| vec![Filter::All, Filter::Active, Filter::Completed]);
+        let filters = Memo::new(move |_| {
+            let current = filter.get();
+            [
+                (Filter::All, "All"),
+                (Filter::Active, "Active"),
+                (Filter::Completed, "Completed"),
+            ]
+            .into_iter()
+            .map(|(option, label)| FilterOption {
+                filter: option,
+                label: label.to_string(),
+                selected: option == current,
+            })
+            .collect()
+        });
         let remaining = Memo::new(move |_| list.get().iter().filter(|t| !t.done).count() as i32);
         let completed = Memo::new(move |_| list.get().iter().filter(|t| t.done).count() as i32);
-        let total = Memo::new(move |_| list.get().len() as i32);
+        let is_empty = Memo::new(move |_| list.get().is_empty());
+        let has_completed = Memo::new(move |_| completed.get() > 0);
         let all_done = Memo::new(move |_| {
             let items = list.get();
             !items.is_empty() && items.iter().all(|t| t.done)
@@ -133,6 +167,8 @@ impl Todos {
                 Filter::Completed => items.into_iter().filter(|t| t.done).collect(),
             }
         });
+
+        let has_visible = Memo::new(move |_| !visible.get().is_empty());
 
         // `new_local` because the wasm storage futures are not `Send`.
         let load_action = Action::new_local({
@@ -157,6 +193,7 @@ impl Todos {
             let failure = |value: Option<Result<(), String>>| value.and_then(Result::err);
             failure(saved_value.get()).or_else(|| failure(loaded_value.get()))
         });
+        let has_error = Memo::new(move |_| last_error.get().is_some());
 
         // Autosave: when the list was dirtied after a successful load and no
         // save is in flight, dispatch one. It runs again when `saving` clears.
@@ -175,11 +212,14 @@ impl Todos {
             next_id,
             remaining,
             completed,
-            total,
+            is_empty,
+            has_completed,
             all_done,
             visible,
+            has_visible,
             saving,
             last_error,
+            has_error,
             input_text,
             editing_id,
             edit_text,
@@ -233,6 +273,14 @@ impl Todos {
         if self.add(&self.input_text.get()) >= 0 {
             self.input_text.set(String::new());
         }
+    }
+
+    /// Whether the todo with this id is the one being edited. A store per id:
+    /// a row subscribes to its own answer and to nothing else.
+    #[plum(watch)]
+    pub fn is_editing(&self, id: i32) -> Memo<bool> {
+        let editing_id = self.editing_id;
+        Memo::new(move |_| editing_id.get() == Some(id))
     }
 
     pub fn start_edit(&self, id: i32) {
@@ -413,6 +461,8 @@ mod tests {
 
         t.set_filter(Filter::Active);
         assert_eq!(t.visible.get().len(), 1);
+        let selected: Vec<_> = t.filters.get().into_iter().filter(|o| o.selected).collect();
+        assert_eq!((selected.len(), selected[0].label.as_str()), (1, "Active"));
         t.set_filter(Filter::Completed);
         assert_eq!(t.visible.get().len(), 1);
         t.set_filter(Filter::All);
@@ -424,6 +474,7 @@ mod tests {
 
         t.remove(a);
         assert!(t.list.get().is_empty());
+        assert!(t.is_empty.get() && !t.has_visible.get() && !t.has_completed.get());
     }
 
     #[test]
@@ -442,11 +493,13 @@ mod tests {
         assert_eq!(t.input_text.get(), "");
 
         t.start_edit(1);
+        assert!(t.is_editing(1).get() && !t.is_editing(2).get());
         assert_eq!(t.edit_text.get(), "write docs");
         t.set_edit_text("changed my mind");
         t.edit_key("Escape");
         assert_eq!(t.list.get()[0].text, "write docs");
         assert_eq!(t.editing_id.get(), None);
+        assert!(!t.is_editing(1).get());
 
         t.start_edit(1);
         t.set_edit_text("write the docs");
