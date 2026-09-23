@@ -485,7 +485,15 @@ fn store_signature(
                 wasm_sigs.push_str(&format!("  {}(cb: (v: {value}) => void): number;\n", #watch));
             } else {
                 store_sigs.push_str(&format!("  {}({params}): {}<{value}>;\n", #js, #kind));
-                store_fns.push_str(&format!("      {}: family(({params}) => {store}),\n", #js));
+                let write_arg = if #setter.is_empty() {
+                    String::new()
+                } else {
+                    format!(", (v: {}) => model.{}({}, v)", value, #setter, #list)
+                };
+                store_fns.push_str(&format!(
+                    "      {}: ({params}) => _paramStores(sharedKey([\"{}\", {}]), (cb: (v: {}) => void) => model.{}({}cb), unwatch{}) as unknown as {}<{}>,\n",
+                    #js, #js, #list, value, #watch, lead, write_arg, #kind, value
+                ));
                 wasm_sigs.push_str(&format!(
                     "  {}({params}, cb: (v: {value}) => void): number;\n",
                     #watch
