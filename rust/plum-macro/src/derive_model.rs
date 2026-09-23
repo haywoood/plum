@@ -427,7 +427,7 @@ fn export_test(model: &Ident, model_name: &str, watches: &[Watch]) -> TokenStrea
                     "}\n\n",
                 ));
             }
-            if body.contains("_paramStores(") {
+            if body.contains("atomCached(") {
                 out.push_str(concat!(
                     "// Deterministic, type-tagged canonical encoding for parameterized store keys.\n",
                     "// Logically-equal arguments always yield the same key, independent of\n",
@@ -457,7 +457,7 @@ fn export_test(model: &Ident, model_name: &str, watches: &[Watch]) -> TokenStrea
                     "}\n",
                     "// Parameterized stores backed by nanostores mapCreator: the cache entry\n",
                     "// and its wasm watch are torn down when the last listener unmounts.\n",
-                    "const _paramStores = mapCreator<any, any[]>((store, _id, watchFn, unwatchFn, writeFn) => {\n",
+                    "const atomCached = mapCreator<any, any[]>((store, _id, watchFn, unwatchFn, writeFn) => {\n",
                     "  const _set = store.set.bind(store);\n",
                     "  const watchId = watchFn((v: any) => _set(v));\n",
                     "  if (writeFn) store.set = (v: any) => { writeFn(v); _set(v); };\n",

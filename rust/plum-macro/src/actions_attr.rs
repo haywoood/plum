@@ -491,7 +491,7 @@ fn store_signature(
                     format!(", (v: {}) => model.{}({}, v)", value, #setter, #list)
                 };
                 store_fns.push_str(&format!(
-                    "      {}: ({params}) => _paramStores(sharedKey([\"{}\", {}]), (cb: (v: {}) => void) => model.{}({}cb), unwatch{}) as unknown as {}<{}>,\n",
+                    "      {}: ({params}) => atomCached(sharedKey([\"{}\", {}]), (cb: (v: {}) => void) => model.{}({}cb), unwatch{}) as unknown as {}<{}>,\n",
                     #js, #js, #list, value, #watch, lead, write_arg, #kind, value
                 ));
                 wasm_sigs.push_str(&format!(
