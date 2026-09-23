@@ -22,6 +22,8 @@ struct Watch<'a> {
     /// The key in the generated stores object, e.g. `todos`.
     store_key: String,
     setter: Setter,
+    /// Doc comment from the field (for manifest generation).
+    doc: String,
 }
 
 /// How JS writes to a store, if it can.
@@ -78,6 +80,20 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                 continue;
             }
             let base = options.js.unwrap_or_else(|| name.to_string());
+            let doc = field.attrs.iter()
+                .filter(|a| a.path().is_ident("doc"))
+                .filter_map(|a| {
+                    if let syn::Meta::NameValue(nv) = &a.meta {
+                        if let syn::Expr::Lit(expr) = &nv.value {
+                            if let syn::Lit::Str(lit) = &expr.lit {
+                                return Some(lit.value().trim_start().to_string());
+                            }
+                        }
+                    }
+                    None
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
             watches.push(Watch {
                 field: name,
                 ty: &field.ty,
@@ -88,6 +104,7 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                     Some(None) => Setter::Direct,
                     Some(Some(method)) => Setter::Method(method),
                 },
+                doc,
             });
         }
     }
@@ -240,10 +257,12 @@ fn export_test(model: &Ident, model_name: &str, watches: &[Watch]) -> TokenStrea
     let pascal = pascal_case(model_name);
     let keys = watches.iter().map(|w| &w.store_key);
     let js_names = watches.iter().map(|w| &w.js_name);
+    let docs = watches.iter().map(|w| &w.doc);
     let values = watches.iter().map(|w| {
         let ty = w.ty;
         quote_spanned! {ty.span()=> <#ty as ::leptos::reactive::traits::Get>::Value }
     });
+    let json_file = format!("{}.json", kebab_case(model_name));
     // The method JS calls to write the store, and whether it is an action
     // of the model (which then stops being listed as one).
     let writers = watches.iter().map(|w| match &w.setter {
@@ -286,7 +305,12 @@ fn export_test(model: &Ident, model_name: &str, watches: &[Watch]) -> TokenStrea
             // and implementations of its stores, then what those stores need
             // from the wasm class. Its inherent `__plum_actions` takes
             // precedence over this trait; a model without one gets nothing.
-            type Actions = (Vec<(&'static str, String, String)>, String, String, String);
+            type Actions = (
+                Vec<(&'static str, String, String, &'static str)>,
+                Vec<(&'static str, Vec<(String, String)>, String, &'static str)>,
+                Vec<(&'static str, &'static str, String, Vec<(String, String)>, &'static str)>,
+                String, String, String,
+            );
             #[allow(dead_code)]
             trait NoActions {
                 fn __plum_actions<V: TypeVisitor>(_: &Config, _: &mut V) -> Actions {
@@ -300,7 +324,7 @@ fn export_test(model: &Ident, model_name: &str, watches: &[Watch]) -> TokenStrea
             let mut named = ::std::collections::BTreeMap::new();
             let mut visitor = Named(&cfg, &mut named);
 
-            let stores: Vec<(&str, &str, String, Option<(&str, bool)>)> = vec![#((
+            let stores: Vec<(&str, &str, String, Option<(&str, bool)>, &str)> = vec![#((
                 #keys,
                 #js_names,
                 {
@@ -308,16 +332,17 @@ fn export_test(model: &Ident, model_name: &str, watches: &[Watch]) -> TokenStrea
                     <#values as TS>::name(&cfg)
                 },
                 #writers,
+                #docs,
             )),*];
-            let (actions, store_sigs, store_fns, mut wasm_sigs): Actions =
+            let (actions, action_entries, store_entries, store_sigs, store_fns, mut wasm_sigs): Actions =
                 <#model>::__plum_actions(&cfg, &mut visitor);
 
             // A method that writes a store is reached through `store.set`.
             let is_setter = |name: &str| {
-                stores.iter().any(|(.., writer)| *writer == Some((name, true)))
+                stores.iter().any(|(_, _, _, writer, _)| *writer == Some((name, true)))
             };
             let (mut action_sigs, mut action_fns) = (String::new(), String::new());
-            for (name, sig, implementation) in &actions {
+            for (name, sig, implementation, _) in &actions {
                 if is_setter(name) {
                     wasm_sigs.push_str(sig);
                 } else {
@@ -334,14 +359,14 @@ fn export_test(model: &Ident, model_name: &str, watches: &[Watch]) -> TokenStrea
                 writeln!(out, "export {decl}\n").unwrap();
             }
             writeln!(out, "export interface {}Stores {{", #pascal).unwrap();
-            for (key, _, ty, writer) in &stores {
+            for (key, _, ty, writer, _) in &stores {
                 let kind = if writer.is_some() { "WritableAtom" } else { "ReadableAtom" };
                 writeln!(out, "  {key}: {kind}<{ty}>;").unwrap();
             }
             writeln!(out, "{store_sigs}}}\n\nexport interface {}Actions {{\n{action_sigs}}}\n", #pascal).unwrap();
             writeln!(out, "/** What bind{0} needs from the wasm class. */", #pascal).unwrap();
             writeln!(out, "interface {0}Wasm extends {0}Actions {{", #pascal).unwrap();
-            for (_, watch, ty, writer) in &stores {
+            for (_, watch, ty, writer, _) in &stores {
                 writeln!(out, "  {watch}(cb: (v: {ty}) => void): number;").unwrap();
                 if let Some((setter, false)) = writer {
                     writeln!(out, "  {setter}(value: {ty}): void;").unwrap();
@@ -351,7 +376,7 @@ fn export_test(model: &Ident, model_name: &str, watches: &[Watch]) -> TokenStrea
             out.push_str("  unwatch(id: number): void;\n  dispose(): void;\n}\n\n");
 
             let mut body = String::new();
-            for (key, watch, ty, writer) in &stores {
+            for (key, watch, ty, writer, _) in &stores {
                 match writer {
                     None => writeln!(
                         body,
@@ -427,10 +452,79 @@ fn export_test(model: &Ident, model_name: &str, watches: &[Watch]) -> TokenStrea
             .unwrap();
 
             let dir = ::std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("plum_gen");
+            ::std::fs::create_dir_all(&dir).unwrap();
             let path = dir.join(#file);
             if ::std::fs::read_to_string(&path).ok().as_deref() != Some(out.as_str()) {
-                ::std::fs::create_dir_all(&dir).unwrap();
                 ::std::fs::write(&path, out).unwrap();
+            }
+
+            // --- JSON manifest for doc generation ---
+            fn jesc(s: &str) -> String {
+                let mut o = String::with_capacity(s.len());
+                for c in s.chars() {
+                    match c {
+                        '"' => o.push_str("\\\""),
+                        '\\' => o.push_str("\\\\"),
+                        '\n' => o.push_str("\\n"),
+                        '\r' => o.push_str("\\r"),
+                        '\t' => o.push_str("\\t"),
+                        c if (c as u32) < 0x20 => {
+                            let _ = ::std::fmt::Write::write_fmt(&mut o, format_args!("\\u{:04x}", c as u32));
+                        }
+                        _ => o.push(c),
+                    }
+                }
+                o
+            }
+
+            let mut store_lines: Vec<String> = Vec::new();
+            for (key, _, ty, writer, doc) in &stores {
+                let kind = if writer.is_some() { "writable" } else { "readable" };
+                store_lines.push(format!(
+                    "    {{\"name\":\"{}\",\"kind\":\"{}\",\"value\":\"{}\",\"args\":[],\"doc\":\"{}\"}}",
+                    jesc(key), kind, jesc(ty), jesc(doc)
+                ));
+            }
+            for (name, kind, value, args, doc) in &store_entries {
+                let args_json: Vec<String> = args.iter()
+                    .map(|(n, t)| format!("{{\"name\":\"{}\",\"type\":\"{}\"}}", jesc(n), jesc(t)))
+                    .collect();
+                store_lines.push(format!(
+                    "    {{\"name\":\"{}\",\"kind\":\"{}\",\"value\":\"{}\",\"args\":[{}],\"doc\":\"{}\"}}",
+                    jesc(name), kind, jesc(value), args_json.join(","), jesc(doc)
+                ));
+            }
+
+            let mut action_lines: Vec<String> = Vec::new();
+            for (name, params, ret, doc) in &action_entries {
+                let params_json: Vec<String> = params.iter()
+                    .map(|(n, t)| format!("{{\"name\":\"{}\",\"type\":\"{}\"}}", jesc(n), jesc(t)))
+                    .collect();
+                action_lines.push(format!(
+                    "    {{\"name\":\"{}\",\"params\":[{}],\"returns\":\"{}\",\"doc\":\"{}\"}}",
+                    jesc(name), params_json.join(","), jesc(ret), jesc(doc)
+                ));
+            }
+
+            let mut type_lines: Vec<String> = Vec::new();
+            for (name, decl) in &named {
+                type_lines.push(format!(
+                    "    {{\"name\":\"{}\",\"decl\":\"{}\"}}",
+                    jesc(name), jesc(decl)
+                ));
+            }
+
+            let mut json = String::new();
+            json.push_str("{\n");
+            json.push_str(&format!("  \"model\":\"{}\",\n", jesc(#model_name)));
+            json.push_str(&format!("  \"stores\":[\n{}\n  ],\n", store_lines.join(",\n")));
+            json.push_str(&format!("  \"actions\":[\n{}\n  ],\n", action_lines.join(",\n")));
+            json.push_str(&format!("  \"types\":[\n{}\n  ]\n", type_lines.join(",\n")));
+            json.push_str("}\n");
+
+            let json_path = dir.join(#json_file);
+            if ::std::fs::read_to_string(&json_path).ok().as_deref() != Some(json.as_str()) {
+                ::std::fs::write(&json_path, &json).unwrap();
             }
         }
     }

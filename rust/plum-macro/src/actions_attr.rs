@@ -60,6 +60,8 @@ struct Options {
     js: Option<String>,
     /// `set = "method"` on a watched method: the method that writes it.
     set: Option<syn::LitStr>,
+    /// Collected from `#[doc]` attrs; used for the generated doc manifest.
+    doc: String,
 }
 
 pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
@@ -126,7 +128,7 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
                     let params = params(func)?;
                     let setter = options.set.as_ref().map(&js_name_of).transpose()?;
                     actions.push(store(func, js, &params)?);
-                    signatures.push(store_signature(func, js, &params, setter.as_deref()));
+                    signatures.push(store_signature(func, js, &params, setter.as_deref(), &options.doc));
                     continue;
                 }
                 if let Some(set) = &options.set {
@@ -141,7 +143,7 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
                 let params = params(func)?;
                 actions.push(action(func, js, &params));
                 // A method that writes a store is reached through `store.set`.
-                signatures.push(signature(func, js, &params, setters.contains(js)));
+                signatures.push(signature(func, js, &params, setters.contains(js), &options.doc));
             }
             None | Some(FnArg::Typed(_)) if name == "new" => {
                 factory = self::factory(func, &model, &wasm, &params(func)?);
@@ -168,15 +170,19 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
             pub fn __plum_actions<V: ::ts_rs::TypeVisitor>(
                 cfg: &::ts_rs::Config,
                 visitor: &mut V,
-            ) -> (Vec<(&'static str, String, String)>, String, String, String) {
-                // The actions as (name, interface member, implementation),
-                // then the interface members and implementations of the
-                // stores, then what the stores need from the wasm class.
-                let mut actions = Vec::new();
+            ) -> (
+                Vec<(&'static str, String, String, &'static str)>,
+                Vec<(&'static str, Vec<(String, String)>, String, &'static str)>,
+                Vec<(&'static str, &'static str, String, Vec<(String, String)>, &'static str)>,
+                String, String, String,
+            ) {
+                let mut actions: Vec<(&'static str, String, String, &'static str)> = Vec::new();
+                let mut action_entries: Vec<(&'static str, Vec<(String, String)>, String, &'static str)> = Vec::new();
+                let mut store_entries: Vec<(&'static str, &'static str, String, Vec<(String, String)>, &'static str)> = Vec::new();
                 let (mut store_sigs, mut store_fns) = (String::new(), String::new());
                 let mut wasm_sigs = String::new();
                 #(#signatures)*
-                (actions, store_sigs, store_fns, wasm_sigs)
+                (actions, action_entries, store_entries, store_sigs, store_fns, wasm_sigs)
             }
         }
     })
@@ -187,6 +193,19 @@ fn take_options(func: &mut ImplItemFn) -> syn::Result<Options> {
     let mut options = Options::default();
     let mut result = Ok(());
     func.attrs.retain(|attr| {
+        if attr.path().is_ident("doc") {
+            if let syn::Meta::NameValue(nv) = &attr.meta {
+                if let syn::Expr::Lit(expr) = &nv.value {
+                    if let syn::Lit::Str(lit) = &expr.lit {
+                        let value = lit.value();
+                        let line = value.trim_start();
+                        if !options.doc.is_empty() { options.doc.push('\n'); }
+                        options.doc.push_str(line);
+                    }
+                }
+            }
+            return true;
+        }
         if !attr.path().is_ident("plum") {
             return true;
         }
@@ -414,6 +433,7 @@ fn store_signature(
     js: &str,
     params: &[Param],
     setter: Option<&str>,
+    doc: &str,
 ) -> TokenStream {
     let ReturnType::Type(_, returned) = &func.sig.output else {
         return TokenStream::new();
@@ -426,13 +446,20 @@ fn store_signature(
         .iter()
         .map(|p| snake_to_camel(&p.name.to_string()))
         .collect();
-    let types = params.iter().map(|p| ts_name(&p.ts));
+    let types: Vec<TokenStream> = params.iter().map(|p| ts_name(&p.ts)).collect();
     let list = labels.join(", ");
     let (kind, make) = match setter {
         Some(_) => ("WritableAtom", "writable"),
         None => ("ReadableAtom", "readable"),
     };
+    let manifest_kind = match setter {
+        Some(_) => "writable",
+        None => "readable",
+    };
     let setter = setter.unwrap_or_default();
+    let manifest_params: Vec<TokenStream> = labels.iter().zip(&types).map(|(label, ty)| {
+        quote! { (#label.to_string(), #ty) }
+    }).collect();
     quote! {
         {
             let value = {
@@ -464,6 +491,7 @@ fn store_signature(
                     #watch
                 ));
             }
+            store_entries.push((#js, #manifest_kind, value, vec![#(#manifest_params),*], #doc));
         }
     }
 }
@@ -498,17 +526,20 @@ fn factory(func: &ImplItemFn, model: &Ident, wasm: &Ident, params: &[Param]) -> 
 /// Records one action for the TypeScript binding. Runs inside the export
 /// test, where ts-rs can name types. A method that writes a store is only
 /// declared on the wasm class.
-fn signature(func: &ImplItemFn, js: &str, params: &[Param], is_setter: bool) -> TokenStream {
+fn signature(func: &ImplItemFn, js: &str, params: &[Param], is_setter: bool, doc: &str) -> TokenStream {
     let labels: Vec<String> = params
         .iter()
         .map(|p| snake_to_camel(&p.name.to_string()))
         .collect();
-    let types = params.iter().map(|p| ts_name(&p.ts));
+    let types: Vec<TokenStream> = params.iter().map(|p| ts_name(&p.ts)).collect();
     let ret = match returned(&func.sig.output) {
         Returned::Nothing | Returned::Fallible(None) => quote!(String::from("void")),
         Returned::Value(ty) | Returned::Fallible(Some(ty)) => ts_name(ty),
     };
     let list = labels.join(", ");
+    let manifest_params: Vec<TokenStream> = labels.iter().zip(&types).map(|(label, ty)| {
+        quote! { (#label.to_string(), #ty) }
+    }).collect();
     quote! {
         {
             let params: Vec<String> = vec![#(format!("{}: {}", #labels, #types)),*];
@@ -517,7 +548,8 @@ fn signature(func: &ImplItemFn, js: &str, params: &[Param], is_setter: bool) -> 
                 wasm_sigs.push_str(&sig);
             } else {
                 let implementation = format!("      {0}: ({1}) => model.{0}({1}),\n", #js, #list);
-                actions.push((#js, sig, implementation));
+                actions.push((#js, sig, implementation, #doc));
+                action_entries.push((#js, vec![#(#manifest_params),*], #ret, #doc));
             }
         }
     }
