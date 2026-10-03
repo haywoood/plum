@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/haywoood/plum"
@@ -16,8 +16,8 @@ keywords = ["leptos", "wasm", "typescript", "nanostores", "signals"]
 categories = ["wasm", "web-programming", "development-tools::ffi"]
 
 [workspace.dependencies]
-leptos = { version = "0.8", default-features = false }
-reactive_graph = { version = "0.2", features = ["effects"] }
+leptos = { version = "0.9.0-beta2", default-features = false }
+reactive_graph = { version = "0.3.0-beta3", features = ["effects"] }
 any_spawner = "0.3"
 serde = { version = "1", features = ["derive"] }
 wasm-bindgen = "0.2"
@@ -26,5 +26,5 @@ wasm-bindgen-futures = "0.4"
 serde-wasm-bindgen = "0.6"
 serde_json = "1"
 ts-rs = "12"
-plum-wasm = { path = "rust/plum-wasm", version = "=0.1.0" }
-plum-macro = { path = "rust/plum-macro", version = "=0.1.0" }
+plum-wasm = { path = "rust/plum-wasm", version = "=0.2.0" }
+plum-macro = { path = "rust/plum-macro", version = "=0.2.0" }

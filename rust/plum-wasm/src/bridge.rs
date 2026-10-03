@@ -143,10 +143,61 @@ fn to_payload<T: serde::Serialize>(value: &T) -> Payload {
         .into()
 }
 
+/// Marks the start of a boundary crossing. A no-op outside debug wasm builds.
+#[cfg(all(target_arch = "wasm32", debug_assertions))]
+pub(crate) fn crossing_started() -> f64 {
+    js_sys::Date::now()
+}
+
+#[cfg(not(all(target_arch = "wasm32", debug_assertions)))]
+pub(crate) fn crossing_started() -> f64 {
+    0.0
+}
+
+/// Warns, at most once per session, when the crossing that began at
+/// `started_ms` took too long. A value that large pays serialization
+/// proportional to its size on *every* crossing, so the fix is a different
+/// store shape (smaller values, key-granular stores), not a faster bridge.
+#[cfg(all(target_arch = "wasm32", debug_assertions))]
+pub(crate) fn warn_slow_crossing(kind: &str, started_ms: f64) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if WARNED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    // 100µs: small payloads cross in a few µs; a crossing this slow almost
+    // always means a large or deeply nested value.
+    const THRESHOLD_MICROS: f64 = 100.0;
+    let elapsed_us = (js_sys::Date::now() - started_ms) * 1000.0;
+    if elapsed_us < THRESHOLD_MICROS {
+        return;
+    }
+    let message = format!(
+        "plum: a {kind} boundary crossing took {elapsed_us:.0} µs — the value is \
+         probably large, and every crossing pays serialization proportional to its \
+         size. Prefer smaller stores or key-granular stores. \
+         [debug builds only; warned once per session]"
+    );
+    // web-sys is deliberately not a dependency; go through the same dynamic
+    // lookup helpers the rest of the crate uses.
+    use crate::js::{get_fn, global};
+    let Ok(console) = js_sys::Reflect::get(&global(), &JsValue::from_str("console")) else {
+        return;
+    };
+    if let Ok(warn) = get_fn(&console, "warn") {
+        let _ = warn.call1(&JsValue::UNDEFINED, &JsValue::from_str(&message));
+    }
+}
+
+#[cfg(not(all(target_arch = "wasm32", debug_assertions)))]
+pub(crate) fn warn_slow_crossing(_kind: &str, _started_ms: f64) {}
+
 /// Calls the JS callback with a payload (wasm only; a no-op natively).
 #[cfg(target_arch = "wasm32")]
 fn push(cb: &Function, payload: &Payload) {
+    let started = crossing_started();
     let _ = cb.call1(&JsValue::UNDEFINED, &to_js(payload));
+    warn_slow_crossing("store notification", started);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -238,6 +289,8 @@ impl Bridge {
         F: Fn() -> Payload + 'static,
         S: Fn(&Payload) + 'static,
     {
+        let id = self.next.get();
+        self.next.set(id + 1);
         let last = RefCell::new(None::<Payload>);
         let deliver: Rc<dyn Fn()> = Rc::new(move || {
             let value = read();
@@ -252,8 +305,6 @@ impl Bridge {
             let deliver = Rc::clone(&deliver);
             move |_: Option<()>| deliver()
         });
-        let id = self.next.get();
-        self.next.set(id + 1);
         self.subs.borrow_mut().insert(
             id,
             Subscription {
@@ -288,7 +339,8 @@ impl Bridge {
             })
             .collect();
         for (subscriber, deliver) in pending {
-            if subscriber.with_observer(|| subscriber.update_if_necessary()) {
+            let needs = subscriber.with_observer(|| subscriber.update_if_necessary());
+            if needs {
                 subscriber.clear_sources(&subscriber);
                 subscriber.with_observer(|| deliver());
             }
@@ -471,6 +523,30 @@ mod tests {
         tick();
         assert_eq!(*counts.borrow(), [Payload::I32(1)]);
         assert_eq!(doubles.borrow().last(), Some(&Payload::I32(18)));
+    }
+
+    /// Mirrors the wasm `watch_json_scoped` path for `#[plum(watch)]` methods:
+    /// a memo created inside `bridge.scope()`, watched through the scoped
+    /// bridge, then updated from a spawned task (like a fetch settling).
+    #[test]
+    fn scoped_memo_watch_delivers_updates_from_spawns() {
+        crate::runtime::init();
+        let bridge = Bridge::new();
+        let perms: RwSignal<Option<Vec<i32>>> = RwSignal::new(None);
+        let scope = bridge.scope();
+        let source = scope.with(|| Memo::new(move |_| perms.get().is_some()));
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        bridge.watch_scoped_with(scope, move || to_payload(&Get::get(&source)), {
+            let seen = Rc::clone(&seen);
+            move |p: &Payload| seen.borrow_mut().push(p.clone())
+        });
+        tick(); // the effect's own first run
+        assert_eq!(*seen.borrow(), [Payload::Bool(false)]);
+        any_spawner::Executor::spawn_local(async move {
+            perms.set(Some(vec![1, 2]));
+        });
+        tick();
+        assert_eq!(*seen.borrow(), [Payload::Bool(false), Payload::Bool(true)]);
     }
 
     #[test]

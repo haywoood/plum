@@ -17,9 +17,12 @@ plain value in an `RwSignal` or a `Memo`.
 `ArcRwSignal`). For a computed value name a method instead:
 `#[plum(watch, set = "set_draft")]`.
 
-**`plum: an async fn cannot be exported`**: put the work in a Leptos
-`Action`, dispatch it from a plain method, watch `pending()` and `value()`.
-See "Async work" in SKILL.md. Or mark the method `#[plum(skip)]`.
+**`plum: an async fn cannot be exported`**: only applies to `new`,
+`#[plum(watch)]` stores, and `set = "..."` targets — those paths must stay
+synchronous. A plain `pub async fn` is fine and returns a `Promise` in
+TypeScript. If you need to watch the work in flight, dispatch a Leptos
+`Action` from it and watch `pending()` and `value()`. Or mark the method
+`#[plum(skip)]`.
 
 **`plum: a generic method cannot be exported`**, **`&mut parameters`**,
 **`an exported parameter needs a plain name`**: mark the method

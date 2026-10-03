@@ -12,16 +12,22 @@ pub use js_sys;
 /// Converts an argument that arrived from JS. A value of the wrong shape
 /// becomes a JS exception that names the action and the parameter.
 pub fn arg<T: DeserializeOwned>(action: &str, param: &str, value: JsValue) -> Result<T, JsValue> {
-    serde_wasm_bindgen::from_value(value)
-        .map_err(|e| Error::new(&format!("{action}: bad argument `{param}`: {e}")).into())
+    let started = crate::bridge::crossing_started();
+    let out = serde_wasm_bindgen::from_value(value)
+        .map_err(|e| Error::new(&format!("{action}: bad argument `{param}`: {e}")).into());
+    crate::bridge::warn_slow_crossing(&format!("argument `{param}` of {action}"), started);
+    out
 }
 
 /// Converts a return value for JS: `None` is `null`, maps are plain objects,
 /// which is how watched values arrive too.
 pub fn ret<T: Serialize + ?Sized>(action: &str, value: &T) -> Result<JsValue, JsValue> {
-    value
+    let started = crate::bridge::crossing_started();
+    let out = value
         .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
-        .map_err(|e| Error::new(&format!("{action}: cannot return value: {e}")).into())
+        .map_err(|e| Error::new(&format!("{action}: cannot return value: {e}")).into());
+    crate::bridge::warn_slow_crossing(&format!("return from {action}"), started);
+    out
 }
 
 /// An `Err` returned by an action, as a JS `Error` to throw.

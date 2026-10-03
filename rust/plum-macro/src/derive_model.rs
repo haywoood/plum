@@ -80,7 +80,9 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                 continue;
             }
             let base = options.js.unwrap_or_else(|| name.to_string());
-            let doc = field.attrs.iter()
+            let doc = field
+                .attrs
+                .iter()
                 .filter(|a| a.path().is_ident("doc"))
                 .filter_map(|a| {
                     if let syn::Meta::NameValue(nv) = &a.meta {
@@ -117,7 +119,7 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
         let body = quote_spanned! {w.ty.span()=>
             let source = ::core::clone::Clone::clone(&self.core.#field);
             self.bridge
-                .watch_json(move || ::leptos::reactive::traits::Get::get(&source), f)
+                .watch_json(move || ::reactive_graph::traits::Get::get(&source), f)
         };
         quote! {
             #[::wasm_bindgen::prelude::wasm_bindgen(js_name = #js_name)]
@@ -137,9 +139,9 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
             let js_name = direct_setter_name(w);
             let (field, ty, key) = (w.field, w.ty, &w.store_key);
             let body = quote_spanned! {ty.span()=>
-                let value: <#ty as ::leptos::reactive::traits::Set>::Value =
+                let value: <#ty as ::reactive_graph::traits::Set>::Value =
                     ::plum_wasm::__rt::arg(#key, "value", value)?;
-                ::leptos::reactive::traits::Set::set(&self.core.#field, value);
+                ::reactive_graph::traits::Set::set(&self.core.#field, value);
                 self.bridge.flush();
                 ::core::result::Result::Ok(())
             };
@@ -260,7 +262,7 @@ fn export_test(model: &Ident, model_name: &str, watches: &[Watch]) -> TokenStrea
     let docs = watches.iter().map(|w| &w.doc);
     let values = watches.iter().map(|w| {
         let ty = w.ty;
-        quote_spanned! {ty.span()=> <#ty as ::leptos::reactive::traits::Get>::Value }
+        quote_spanned! {ty.span()=> <#ty as ::reactive_graph::traits::Get>::Value }
     });
     let json_file = format!("{}.json", kebab_case(model_name));
     // The method JS calls to write the store, and whether it is an action
@@ -380,11 +382,11 @@ fn export_test(model: &Ident, model_name: &str, watches: &[Watch]) -> TokenStrea
                 match writer {
                     None => writeln!(
                         body,
-                        "      {key}: readable<{ty}>((cb) => model.{watch}(cb), unwatch),"
+                        "      {key}: readable<{ty}>((cb) => __core.{watch}(cb), unwatch),"
                     ),
                     Some((setter, _)) => writeln!(
                         body,
-                        "      {key}: writable<{ty}>((cb) => model.{watch}(cb), unwatch, (v) => model.{setter}(v)),"
+                        "      {key}: writable<{ty}>((cb) => __core.{watch}(cb), unwatch, (v) => __core.{setter}(v)),"
                     ),
                 }
                 .unwrap();
@@ -467,7 +469,7 @@ fn export_test(model: &Ident, model_name: &str, watches: &[Watch]) -> TokenStrea
             }
             write!(
                 out,
-                "export function bind{0}(model: {0}Wasm): {{\n  stores: {0}Stores;\n  actions: {0}Actions;\n  dispose: () => void;\n}} {{\n  const unwatch = (id: number) => model.unwatch(id);\n  return {{\n    stores: {{\n{body}    }},\n    actions: {{\n{action_fns}    }},\n    dispose: () => model.dispose(),\n  }};\n}}\n",
+                "export function bind{0}(__core: {0}Wasm): {{\n  stores: {0}Stores;\n  actions: {0}Actions;\n  dispose: () => void;\n}} {{\n  const unwatch = (id: number) => __core.unwatch(id);\n  return {{\n    stores: {{\n{body}    }},\n    actions: {{\n{action_fns}    }},\n    dispose: () => __core.dispose(),\n  }};\n}}\n",
                 #pascal
             )
             .unwrap();

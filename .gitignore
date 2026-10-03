@@ -15,3 +15,6 @@ target/
 
 # logs
 *.log
+
+# per-machine cargo config (local registry mirrors, etc.)
+.cargo/

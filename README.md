@@ -37,7 +37,7 @@ and it is work an agent does well.
 
 - A recent stable Rust (CI uses 1.98) with the `wasm32-unknown-unknown` target
 - [wasm-pack](https://rustwasm.github.io/wasm-pack/)
-- Leptos 0.8
+- Leptos 0.9 (or `reactive_graph` 0.3 directly, without leptos)
 - Node 20 or later for the TypeScript side
 
 ## Integrating
@@ -61,13 +61,13 @@ everything that changes them. plum does not help with that.
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
-leptos = { version = "0.8", default-features = false }
+leptos = { version = "0.9.0-beta2", default-features = false }
 serde = { version = "1", features = ["derive"] }
 ts-rs = "12"
-plum-macro = "0.1"
+plum-macro = "0.2"
 
 # wasm build only
-plum-wasm = { version = "0.1", optional = true }
+plum-wasm = { version = "0.2", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 
 [features]
@@ -194,13 +194,14 @@ How actions behave:
 - A returned `Err` is thrown as a JS `Error`. `Ok(value)` returns the value.
 - `None` is `null` in both directions, and `undefined` is accepted for an
   `Option` parameter.
-- Actions are synchronous. Async work goes in a Leptos `Action` that a plain
-  method dispatches. Its `pending()`, `value()`, `input()` and `version()`
-  implement `Get`, so they can be watched like any other field: `pending` is
-  already `true` when the dispatching call returns, and the result arrives in
-  a store. The example loads and saves this way. A `pub async fn` in the
-  block is a compile error that says so. On wasm, futures that touch JS are
-  not `Send`, so use `Action::new_local` and `dispatch_local`.
+- A `pub async fn` is exported as an async action: the TypeScript surface
+  returns a `Promise` of the declared return type, and the body runs on the
+  wasm async runtime. `new`, `#[plum(watch)]` stores, and `set = "..."`
+  targets must stay synchronous. For long-running work you also want to
+  watch, a Leptos `Action` is still the usual shape: dispatch it from a
+  plain method and watch `pending()` and `value()` like any other field.
+  On wasm, futures that touch JS are not `Send`, so use `Action::new_local`
+  and `dispatch_local`.
 
 ### 4. Build
 
