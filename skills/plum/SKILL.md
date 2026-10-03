@@ -345,13 +345,19 @@ Behaviour worth designing around:
 
 ### 4. Async work
 
-Actions are synchronous; a `pub async fn` in the block is a compile error.
-Put async work in a Leptos `Action` and dispatch it from a plain method, as
-`pay()` does above. The action's `pending()`, `value()`, `input()` and
-`version()` implement `Get`, so they are watched like any field: `paying` is
-`charge.pending()`, and `error` is a memo over `charge.value()`. `paying` is
-already `true` when `pay()` returns to JS, and the outcome arrives in
-`error`.
+A `pub async fn` in the block is exported as an async action: the TypeScript
+surface returns a `Promise` of the declared return type, and the body runs on
+the wasm async runtime (wasm-bindgen-futures). `new`, `#[plum(watch)]` stores,
+and `set = "..."` targets must stay synchronous — those paths read or write
+reactive state, which is synchronous by construction.
+
+For long-running work you also want to *watch* (progress, errors), the Leptos
+`Action` pattern is still the usual shape: dispatch it from a plain method
+or async action and watch `pending()` and `value()` like any other field —
+`paying` is `charge.pending()`, and `error` is a memo over `charge.value()`.
+`paying` is already `true` when the dispatching call returns, and the outcome
+arrives in a store. `pay()` above dispatches a `LeptosAction` and returns
+`Promise<void>`; the charge's `pending()`/`value()` are the watched stores.
 
 Use `Action::new_local` and `dispatch_local` whenever the future touches JS:
 those futures are not `Send`. In native tests, call `runtime::pump()` after

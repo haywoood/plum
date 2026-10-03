@@ -11,8 +11,13 @@
 //! Every argument arrives as a `JsValue` and is deserialized into the type
 //! the method declares, so the macro never has to recognise a type by name.
 //!
-//! Actions are synchronous. Async work belongs in a Leptos `Action` that a
-//! plain method dispatches; its `pending()` and `value()` are watchable.
+//! Actions are synchronous by default. An `async fn` is exported as an async
+//! wasm action: the TypeScript surface returns a `Promise` of the declared
+//! return type. `#[plum(watch)]` stores, the `new` factory, and any method
+//! referenced as a `set` target must stay synchronous.
+//!
+//! Async methods are fully supported: the JS side receives a `Promise` and
+//! the body runs on the wasm async runtime (wasm-bindgen-futures).
 
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote, quote_spanned};
@@ -115,12 +120,34 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
         let name = func.sig.ident.to_string();
         let exported = name == "new" || matches!(func.sig.inputs.first(), Some(FnArg::Receiver(_)));
         if let (true, Some(asyncness)) = (exported, &func.sig.asyncness) {
-            return Err(syn::Error::new_spanned(
-                asyncness,
-                "plum: an `async fn` cannot be exported. Put the work in a Leptos `Action`, \
-                 dispatch it from a plain method and watch its `pending()` and `value()`; \
-                 or mark this method #[plum(skip)]",
-            ));
+            if name == "new" {
+                return Err(syn::Error::new_spanned(
+                    asyncness,
+                    "plum: `new` cannot be async; the factory must construct the model synchronously",
+                ));
+            }
+            if options.watch {
+                return Err(syn::Error::new_spanned(
+                    asyncness,
+                    "plum: a #[plum(watch)] method cannot be async; watch stores read a \
+                     synchronous value. Drop #[plum(watch)] to expose it as an async \
+                     action (a Promise in TypeScript).",
+                ));
+            }
+            if options.set.is_some() || setters.contains(js) {
+                return Err(syn::Error::new_spanned(
+                    asyncness,
+                    "plum: a method referenced as `set = \"...\"` cannot be async; \
+                     the store write path is synchronous",
+                ));
+            }
+            if returns_handle(&func.sig.output) {
+                return Err(syn::Error::new_spanned(
+                    asyncness,
+                    "plum: an async method cannot return a reactive handle (Memo, Signal, \
+                     ...); return the plain value it holds instead",
+                ));
+            }
         }
         match func.sig.inputs.first() {
             Some(FnArg::Receiver(r)) if r.reference.is_some() && r.mutability.is_none() => {
@@ -128,7 +155,13 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
                     let params = params(func)?;
                     let setter = options.set.as_ref().map(&js_name_of).transpose()?;
                     actions.push(store(func, js, &params)?);
-                    signatures.push(store_signature(func, js, &params, setter.as_deref(), &options.doc));
+                    signatures.push(store_signature(
+                        func,
+                        js,
+                        &params,
+                        setter.as_deref(),
+                        &options.doc,
+                    ));
                     continue;
                 }
                 if let Some(set) = &options.set {
@@ -143,7 +176,13 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
                 let params = params(func)?;
                 actions.push(action(func, js, &params));
                 // A method that writes a store is reached through `store.set`.
-                signatures.push(signature(func, js, &params, setters.contains(js), &options.doc));
+                signatures.push(signature(
+                    func,
+                    js,
+                    &params,
+                    setters.contains(js),
+                    &options.doc,
+                ));
             }
             None | Some(FnArg::Typed(_)) if name == "new" => {
                 factory = self::factory(func, &model, &wasm, &params(func)?);
@@ -199,7 +238,9 @@ fn take_options(func: &mut ImplItemFn) -> syn::Result<Options> {
                     if let syn::Lit::Str(lit) = &expr.lit {
                         let value = lit.value();
                         let line = value.trim_start();
-                        if !options.doc.is_empty() { options.doc.push('\n'); }
+                        if !options.doc.is_empty() {
+                            options.doc.push('\n');
+                        }
                         options.doc.push_str(line);
                     }
                 }
@@ -324,21 +365,28 @@ fn call_args(params: &[Param]) -> Vec<TokenStream> {
 
 fn action(func: &ImplItemFn, js: &str, params: &[Param]) -> TokenStream {
     let name = &func.sig.ident;
+    let is_async = func.sig.asyncness.is_some();
+    let async_kw = if is_async { quote!(async) } else { quote!() };
     let names = params.iter().map(|p| &p.name);
     let conversions = conversions(js, params);
     let args = call_args(params);
+    let call = if is_async {
+        quote!(core.#name(#(#args),*).await)
+    } else {
+        quote!(core.#name(#(#args),*))
+    };
     let undefined = quote!(::core::result::Result::Ok(
         ::wasm_bindgen::JsValue::UNDEFINED
     ));
 
     let body = match returned(&func.sig.output) {
         Returned::Nothing => quote! {
-            core.#name(#(#args),*);
+            #call;
             bridge.flush();
             #undefined
         },
         Returned::Value(_) => quote! {
-            let out = core.#name(#(#args),*);
+            let out = #call;
             bridge.flush();
             ::plum_wasm::__rt::ret(#js, &out)
         },
@@ -348,7 +396,7 @@ fn action(func: &ImplItemFn, js: &str, params: &[Param]) -> TokenStream {
                 None => undefined.clone(),
             };
             quote! {
-                let out = core.#name(#(#args),*);
+                let out = #call;
                 bridge.flush();
                 match out {
                     ::core::result::Result::Ok(value) => {
@@ -365,7 +413,7 @@ fn action(func: &ImplItemFn, js: &str, params: &[Param]) -> TokenStream {
 
     quote! {
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = #js)]
-        pub fn #name(
+        pub #async_kw fn #name(
             &self,
             #(#names: ::wasm_bindgen::JsValue),*
         ) -> ::core::result::Result<::wasm_bindgen::JsValue, ::wasm_bindgen::JsValue> {
@@ -398,7 +446,7 @@ fn store(func: &ImplItemFn, js: &str, params: &[Param]) -> syn::Result<TokenStre
         let source = scope.with(|| core.#name(#(#args),*));
         ::core::result::Result::Ok(bridge.watch_json_scoped(
             scope,
-            move || ::leptos::reactive::traits::Get::get(&source),
+            move || ::reactive_graph::traits::Get::get(&source),
             f,
         ))
     };
@@ -439,7 +487,7 @@ fn store_signature(
         return TokenStream::new();
     };
     let value = quote_spanned! {returned.span()=>
-        <#returned as ::leptos::reactive::traits::Get>::Value
+        <#returned as ::reactive_graph::traits::Get>::Value
     };
     let watch = watch_name(js);
     let labels: Vec<String> = params
@@ -457,9 +505,13 @@ fn store_signature(
         None => "readable",
     };
     let setter = setter.unwrap_or_default();
-    let manifest_params: Vec<TokenStream> = labels.iter().zip(&types).map(|(label, ty)| {
-        quote! { (#label.to_string(), #ty) }
-    }).collect();
+    let manifest_params: Vec<TokenStream> = labels
+        .iter()
+        .zip(&types)
+        .map(|(label, ty)| {
+            quote! { (#label.to_string(), #ty) }
+        })
+        .collect();
     quote! {
         {
             let value = {
@@ -473,10 +525,10 @@ fn store_signature(
             let write = if #setter.is_empty() {
                 String::new()
             } else {
-                format!(", (v) => model.{}({lead}v)", #setter)
+                format!(", (v) => __core.{}({lead}v)", #setter)
             };
             let store = format!(
-                "{}<{value}>((cb) => model.{}({lead}cb), unwatch{write})",
+                "{}<{value}>((cb) => __core.{}({lead}cb), unwatch{write})",
                 #make, #watch
             );
             if #list.is_empty() {
@@ -488,10 +540,10 @@ fn store_signature(
                 let write_arg = if #setter.is_empty() {
                     String::new()
                 } else {
-                    format!(", (v: {}) => model.{}({}, v)", value, #setter, #list)
+                    format!(", (v: {}) => __core.{}({}, v)", value, #setter, #list)
                 };
                 store_fns.push_str(&format!(
-                    "      {}: ({params}) => atomCached(sharedKey([\"{}\", {}]), (cb: (v: {}) => void) => model.{}({}cb), unwatch{}) as unknown as {}<{}>,\n",
+                    "      {}: ({params}) => atomCached(sharedKey([\"{}\", {}]), (cb: (v: {}) => void) => __core.{}({}cb), unwatch{}) as unknown as {}<{}>,\n",
                     #js, #js, #list, value, #watch, lead, write_arg, #kind, value
                 ));
                 wasm_sigs.push_str(&format!(
@@ -534,20 +586,44 @@ fn factory(func: &ImplItemFn, model: &Ident, wasm: &Ident, params: &[Param]) -> 
 /// Records one action for the TypeScript binding. Runs inside the export
 /// test, where ts-rs can name types. A method that writes a store is only
 /// declared on the wasm class.
-fn signature(func: &ImplItemFn, js: &str, params: &[Param], is_setter: bool, doc: &str) -> TokenStream {
+fn signature(
+    func: &ImplItemFn,
+    js: &str,
+    params: &[Param],
+    is_setter: bool,
+    doc: &str,
+) -> TokenStream {
+    let is_async = func.sig.asyncness.is_some();
     let labels: Vec<String> = params
         .iter()
         .map(|p| snake_to_camel(&p.name.to_string()))
         .collect();
     let types: Vec<TokenStream> = params.iter().map(|p| ts_name(&p.ts)).collect();
     let ret = match returned(&func.sig.output) {
-        Returned::Nothing | Returned::Fallible(None) => quote!(String::from("void")),
-        Returned::Value(ty) | Returned::Fallible(Some(ty)) => ts_name(ty),
+        Returned::Nothing | Returned::Fallible(None) => {
+            if is_async {
+                quote!(String::from("Promise<void>"))
+            } else {
+                quote!(String::from("void"))
+            }
+        }
+        Returned::Value(ty) | Returned::Fallible(Some(ty)) => {
+            if is_async {
+                let inner = ts_name(ty);
+                quote!(format!("Promise<{}>", { #inner }))
+            } else {
+                ts_name(ty)
+            }
+        }
     };
     let list = labels.join(", ");
-    let manifest_params: Vec<TokenStream> = labels.iter().zip(&types).map(|(label, ty)| {
-        quote! { (#label.to_string(), #ty) }
-    }).collect();
+    let manifest_params: Vec<TokenStream> = labels
+        .iter()
+        .zip(&types)
+        .map(|(label, ty)| {
+            quote! { (#label.to_string(), #ty) }
+        })
+        .collect();
     quote! {
         {
             let params: Vec<String> = vec![#(format!("{}: {}", #labels, #types)),*];
@@ -555,7 +631,7 @@ fn signature(func: &ImplItemFn, js: &str, params: &[Param], is_setter: bool, doc
             if #is_setter {
                 wasm_sigs.push_str(&sig);
             } else {
-                let implementation = format!("      {0}: ({1}) => model.{0}({1}),\n", #js, #list);
+                let implementation = format!("      {0}: ({1}) => __core.{0}({1}),\n", #js, #list);
                 actions.push((#js, sig, implementation, #doc));
                 action_entries.push((#js, vec![#(#manifest_params),*], #ret, #doc));
             }
